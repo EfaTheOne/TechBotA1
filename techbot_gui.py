@@ -210,7 +210,142 @@ def scan_nearby_wifi_pywifi():
         results.append({'ssid': f'ERROR: {e}', 'signal': 'N/A', 'auth': 'N/A'})
     return results
 
-def wifi_brute_gen(length):
+def scan_bssid_networks():
+    """Scan BSSIDs — equivalent to 'netsh wlan show networks mode=Bssid'"""
+    results = []
+    if os.name != 'nt':
+        # Linux/Mac fallback using pywifi
+        try:
+            wifi = pywifi.PyWiFi()
+            iface = wifi.interfaces()[0]
+            iface.scan()
+            time.sleep(4)
+            for net in iface.scan_results():
+                ssid = net.ssid if net.ssid else '[HIDDEN]'
+                bssid = net.bssid if net.bssid else 'N/A'
+                signal = net.signal
+                auth_map = {0: 'Open', 1: 'WPA', 2: 'WPA-PSK', 3: 'WPA2', 4: 'WPA2-PSK', 5: 'WPA2-Enterprise'}
+                auth_val = net.akm[0] if net.akm else 0
+                auth = auth_map.get(auth_val, f'Unknown({auth_val})')
+                results.append({
+                    'ssid': ssid, 'bssid': bssid, 'signal': signal,
+                    'network_type': 'Infrastructure', 'auth': auth,
+                    'encryption': 'CCMP' if auth_val >= 3 else 'TKIP' if auth_val >= 1 else 'None',
+                    'channel': getattr(net, 'freq', 0),
+                })
+            results.sort(key=lambda x: x.get('signal', -100), reverse=True)
+        except Exception as e:
+            results.append({'ssid': f'ERROR: {e}', 'bssid': 'N/A'})
+        return results
+
+    # Windows: parse netsh output directly for full BSSID info
+    try:
+        raw = subprocess.check_output(
+            ['netsh', 'wlan', 'show', 'networks', 'mode=Bssid'],
+            text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        current = {}
+        for line in raw.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('SSID') and ':' in line and 'BSSID' not in line:
+                if current.get('bssid'):
+                    results.append(current)
+                    current = {}
+                current['ssid'] = line.split(':', 1)[1].strip() or '[HIDDEN]'
+            elif line.startswith('Network type'):
+                current['network_type'] = line.split(':', 1)[1].strip()
+            elif line.startswith('Authentication'):
+                current['auth'] = line.split(':', 1)[1].strip()
+            elif line.startswith('Encryption'):
+                current['encryption'] = line.split(':', 1)[1].strip()
+            elif line.startswith('BSSID'):
+                if current.get('bssid'):
+                    # Multiple BSSIDs for same SSID — clone entry
+                    prev = dict(current)
+                    results.append(prev)
+                current['bssid'] = line.split(':', 1)[1].strip()
+            elif line.startswith('Signal'):
+                val = line.split(':', 1)[1].strip().replace('%', '')
+                try:
+                    current['signal'] = int(val)
+                except ValueError:
+                    current['signal'] = 0
+            elif line.startswith('Radio type'):
+                current['radio'] = line.split(':', 1)[1].strip()
+            elif line.startswith('Channel'):
+                current['channel'] = line.split(':', 1)[1].strip()
+        if current.get('bssid'):
+            results.append(current)
+        results.sort(key=lambda x: x.get('signal', 0), reverse=True)
+    except Exception as e:
+        results.append({'ssid': f'ERROR: {e}', 'bssid': 'N/A'})
+    return results
+
+
+def bruteforce_generator(charset_mode, max_length, target_check=None, callback=None, done_cb=None, stop_flag=None):
+    """Sequential brute-force generator that tries EVERY combination.
+    charset_mode: 'lower', 'alpha', 'alnum', 'alnumsym', 'all'
+    max_length: max digits/chars to try (1 to max_length)
+    target_check: optional callable(candidate) -> bool for matching
+    callback: progress reporting
+    done_cb: called with (result_or_None, total_tested, elapsed)
+    stop_flag: list [bool] to abort
+    """
+    charsets = {
+        'lower':    string.ascii_lowercase,
+        'alpha':    string.ascii_letters,
+        'alnum':    string.ascii_letters + string.digits,
+        'alnumsym': string.ascii_letters + string.digits + '!$#*',
+        'all':      string.ascii_letters + string.digits + string.punctuation,
+    }
+    chars = charsets.get(charset_mode, charsets['alnum'])
+
+    if callback:
+        callback(f"  [*] Charset: {charset_mode} ({len(chars)} characters)")
+        callback(f"  [*] Max length: {max_length}")
+        total_possible = sum(len(chars) ** l for l in range(1, max_length + 1))
+        callback(f"  [*] Total combinations: {total_possible:,}")
+        callback("")
+
+    tested = 0
+    start_time = time.time()
+
+    for length in range(1, max_length + 1):
+        if stop_flag and stop_flag[0]:
+            break
+        if STOP_EVENT.is_set():
+            break
+        if callback:
+            callback(f"  [*] Testing length {length}/{max_length}...")
+        for combo in itertools.product(chars, repeat=length):
+            if stop_flag and stop_flag[0]:
+                break
+            if STOP_EVENT.is_set():
+                break
+            candidate = ''.join(combo)
+            tested += 1
+
+            if target_check and target_check(candidate):
+                elapsed = time.time() - start_time
+                if callback:
+                    callback(f"  [+] ██ MATCH FOUND ██  '{candidate}'")
+                if done_cb:
+                    done_cb(candidate, tested, elapsed)
+                return
+
+            if tested % 50000 == 0 and callback:
+                elapsed = time.time() - start_time
+                rate = tested / elapsed if elapsed > 0 else 0
+                callback(f"  [░] Tested: {tested:>12,} | Rate: {rate:,.0f}/s | Current: {candidate}")
+
+    elapsed = time.time() - start_time
+    if done_cb:
+        done_cb(None, tested, elapsed)
+
+
     """Generator for incremental brute-force (random password scrambling style)"""
     chars = string.ascii_letters + string.digits + "!@#$%^&*"
     for combo in itertools.product(chars, repeat=length):
@@ -2104,9 +2239,17 @@ class TechBotGUI(ctk.CTk):
             self.ghost_lbl.configure(text="")
             return
             
-        cmds = ["techbot help", "techbot clear", "techbot scan", "techbot wifi", "techbot brute", 
-                "techbot recon", "techbot status", "techbot netcat", "techbot nmap", "techbot whois",
-                "techbot agent", "techbot broadcast", "techbot lookup", "techbot whoami"]
+        cmds = ["techbot help", "techbot clear", "techbot scan", "techbot wifi", "techbot brute",
+                "techbot bruteforce", "techbot bssid", "techbot recon", "techbot status",
+                "techbot netstat", "techbot whois", "techbot agent", "techbot broadcast",
+                "techbot lookup", "techbot whoami", "techbot hashcat", "techbot hash",
+                "techbot arpspoof", "techbot arpscan", "techbot sniff", "techbot ping",
+                "techbot dirbust", "techbot httpvuln", "techbot subdomain", "techbot dns",
+                "techbot trace", "techbot shell", "techbot flood", "techbot fuzz",
+                "techbot proxy", "techbot encrypt", "techbot decrypt", "techbot codec",
+                "techbot dump", "techbot passgen", "techbot hashid", "techbot dnsspoof",
+                "techbot gethash", "techbot banner", "techbot model", "techbot history",
+                "techbot export", "techbot usage", "techbot manual", "techbot kill"]
         match = ""
         for c in cmds:
             if c.startswith(val.lower()) and val.lower() != c:
@@ -2369,12 +2512,14 @@ class TechBotGUI(ctk.CTk):
             "model": self.tool_model,
             "history": self.tool_history,
             "export": self.tool_export,
+            "bssid": self.tool_bssid_scan,
+            "bruteforce": self.tool_bruteforce_gen,
         }
         
         if base_cmd in commands:
             func = commands[base_cmd]
             try:
-                if base_cmd in ["help", "clear", "kill", "exit", "status", "recon", "dump", "manual"]:
+                if base_cmd in ["help", "clear", "kill", "exit", "status", "recon", "dump", "manual", "arpscan", "netstat", "whoami", "bssid"]:
                     func()
                 elif base_cmd == "wifi":
                     func(args)
@@ -2425,53 +2570,167 @@ class TechBotGUI(ctk.CTk):
 
     def show_help(self):
         self.cprint("\n" + "═"*80, "dim")
-        self.cprint("  TECHBOT A1 v10.0  |  PHANTOM OPS MANUAL", "cyan")
+        self.cprint("  TECHBOT A1 v10.0  ──  PHANTOM OPS  ──  COMPLETE COMMAND REFERENCE", "cyan")
         self.cprint("═"*80, "dim")
-        self.cprint("  USAGE: techbot <command> [args]    |    Just type text to ask AI", "yellow")
+        self.cprint("", "dim")
+        self.cprint("  HOW TO USE:", "white")
+        self.cprint("    • All commands start with 'techbot' followed by a command name.", "dim")
+        self.cprint("    • Example: techbot scan 192.168.1.1 1-1024", "dim")
+        self.cprint("    • Typing text WITHOUT 'techbot' sends it to the AI assistant.", "dim")
+        self.cprint("    • Press TAB to autocomplete commands. UP/DOWN for history.", "dim")
+        self.cprint("    • Press Ctrl+L or type 'techbot kill' to stop all running jobs.", "dim")
+        self.cprint("", "dim")
         self.cprint("─" * 80, "dim")
-        self.cprint("  ▸ WIFI", "green")
-        self.cprint("    wifi scan                    Scan nearby WiFi networks", "dim")
-        self.cprint("    wifi crack <SSID>            Attempt WiFi password crack", "dim")
-        self.cprint("    gethash local                Dump saved WiFi passwords", "dim")
-        self.cprint("    gethash bssid=AA:BB:CC...    Capture WPA handshake", "dim")
+        self.cprint("  ▸ WIRELESS RECONNAISSANCE", "green")
         self.cprint("─" * 80, "dim")
-        self.cprint("  ▸ NETWORK", "cyan")
-        self.cprint("    arpscan                      Discover devices on LAN", "dim")
-        self.cprint("    ping 192.168.1.0/24          ICMP sweep subnet", "dim")
-        self.cprint("    scan 10.0.0.1 1-1024         Port scan target", "dim")
-        self.cprint("    banner 10.0.0.1 80           Grab service banner", "dim")
-        self.cprint("    sniff [-f] [-d]              Capture packets", "dim")
-        self.cprint("    arpspoof 10.0.0.5 10.0.0.1   MITM ARP poisoning", "dim")
-        self.cprint("    trace google.com             Visual traceroute", "dim")
-        self.cprint("    flood 10.0.0.1 80            UDP flood stress test", "dim")
-        self.cprint("    fuzz 10.0.0.1                Protocol fuzzer", "dim")
+        self.cprint("    wifi scan                         Scan all nearby WiFi networks (SSID,", "dim")
+        self.cprint("                                      BSSID, signal, auth, encryption)", "dim")
+        self.cprint("    wifi crack <SSID> <HASH> [flags]  Offline WPA2 hash cracker", "dim")
+        self.cprint("         -w <file>                      Use custom wordlist file", "dim")
+        self.cprint("         -b <length>                    Brute-force at given length", "dim")
+        self.cprint("         -p <password>                  Test a single password", "dim")
+        self.cprint("    bssid                             Scan BSSIDs (like netsh wlan show", "dim")
+        self.cprint("                                      networks mode=Bssid)", "dim")
+        self.cprint("    gethash local                     Dump all saved WiFi passwords from", "dim")
+        self.cprint("                                      this machine (Windows only)", "dim")
+        self.cprint("    gethash bssid=AA:BB:CC:DD:EE:FF   Capture WPA handshake from target", "dim")
+        self.cprint("         [deauth=XX:XX:XX:XX:XX:XX]    Deauth a specific client to force", "dim")
+        self.cprint("                                        handshake re-negotiation", "dim")
+        self.cprint("", "dim")
         self.cprint("─" * 80, "dim")
-        self.cprint("  ▸ WEB", "orange")
-        self.cprint("    httpvuln example.com         Scan HTTP security headers", "dim")
-        self.cprint("    dirbust example.com          Brute-force directories", "dim")
-        self.cprint("    brute http://10.0.0.1        HTTP credential attack", "dim")
-        self.cprint("    subdomain example.com        Enumerate subdomains", "dim")
-        self.cprint("    dns example.com              DNS record enumeration", "dim")
-        self.cprint("    dnsspoof ex.com 10.0.0.5     DNS redirect", "dim")
-        self.cprint("    proxy example.com            Stealth proxy browser", "dim")
-        self.cprint("    whois example.com            WHOIS lookup", "dim")
-        self.cprint("    lookup 8.8.8.8               OSINT/GeoIP/ASN intel", "dim")
+        self.cprint("  ▸ NETWORK SCANNING & DISCOVERY", "cyan")
         self.cprint("─" * 80, "dim")
-        self.cprint("  ▸ CRYPTO & SYSTEM", "purple")
-        self.cprint("    hash <hash_value>            Crack hash (MD5/SHA)", "dim")
-        self.cprint("    encrypt/decrypt <file>       AES-256 File crypto", "dim")
-        self.cprint("    dump                         Full system diagnostic", "dim")
-        self.cprint("    whoami / netstat             System persistence & context", "dim")
-        self.cprint("    shell 4444                   Start reverse shell listener", "dim")
+        self.cprint("    arpscan                           ARP scan local subnet, find all", "dim")
+        self.cprint("                                      devices (IP + MAC). Requires admin.", "dim")
+        self.cprint("    ping <subnet>                     ICMP sweep (e.g. 'ping 192.168.1')", "dim")
+        self.cprint("                                      Scans .1-.254 with 64 threads", "dim")
+        self.cprint("    scan <ip> [range]                 TCP port scan (default 1-1024)", "dim")
+        self.cprint("                                      Example: scan 10.0.0.1 1-65535", "dim")
+        self.cprint("    banner <ip> <port>                Grab service banner from a port", "dim")
+        self.cprint("    sniff [-f <bpf>] [-d <domain>]    Live packet capture with protocol", "dim")
+        self.cprint("                                      detection (DNS, HTTP, credentials)", "dim")
+        self.cprint("                                      -f: BPF filter (e.g. 'tcp port 80')", "dim")
+        self.cprint("                                      -d: only show matching domain", "dim")
+        self.cprint("    recon                             Full network recon: ARP table,", "dim")
+        self.cprint("                                      routing, WiFi profiles, local IP", "dim")
+        self.cprint("    netstat                           Show all active network connections", "dim")
+        self.cprint("                                      with PID, process, and status", "dim")
+        self.cprint("    trace <target>                    Visual traceroute with geolocation", "dim")
+        self.cprint("                                      for each hop (city, ISP, lat/lon)", "dim")
+        self.cprint("", "dim")
         self.cprint("─" * 80, "dim")
-        self.cprint("  ▸ AI & GENERAL", "white")
-        self.cprint("    agent <task>                 Autonomous AI Agent", "red")
-        self.cprint("    model [list|key]             Switch AI Model / Set Key", "green")
-        self.cprint("    history                      Show command history", "dim")
-        self.cprint("    export [file]                Save terminal output", "dim")
-        self.cprint("    clear / kill / exit          Term controls", "dim")
-        self.cprint("    v / voice                    Toggle Voice Mode", "dim")
-        self.cprint("═"*80 + "\n", "dim")
+        self.cprint("  ▸ OFFENSIVE / ATTACK TOOLS", "red")
+        self.cprint("─" * 80, "dim")
+        self.cprint("    arpspoof <target> <gateway>       ARP cache poisoning (MITM attack)", "dim")
+        self.cprint("                                      Intercepts traffic between target", "dim")
+        self.cprint("                                      and gateway. Requires admin.", "dim")
+        self.cprint("    dnsspoof <domain> <redirect_ip>   DNS spoofing — redirect domain", "dim")
+        self.cprint("                                      queries to your IP. Requires admin.", "dim")
+        self.cprint("    flood <ip> <port>                 UDP flood stress test. Sends 1KB", "dim")
+        self.cprint("                                      packets continuously. Use Ctrl+L", "dim")
+        self.cprint("                                      to stop.", "dim")
+        self.cprint("    fuzz <ip>                         Protocol fuzzer — sends random", "dim")
+        self.cprint("                                      malformed TCP/UDP/ICMP packets", "dim")
+        self.cprint("    shell <port>                      Start reverse shell listener.", "dim")
+        self.cprint("                                      Displays connection payloads for", "dim")
+        self.cprint("                                      Bash, Python, and PowerShell.", "dim")
+        self.cprint("    broadcast <message>               Send a message to ALL devices on", "dim")
+        self.cprint("                                      local network via UDP broadcast,", "dim")
+        self.cprint("                                      TCP direct, NetBIOS, and Windows MSG", "dim")
+        self.cprint("    agent <task description>          Launch autonomous AI hacking agent", "dim")
+        self.cprint("                                      Supports NETWORK and SCREEN modes.", "dim")
+        self.cprint("                                      Failsafe: move mouse to corner", "dim")
+        self.cprint("", "dim")
+        self.cprint("─" * 80, "dim")
+        self.cprint("  ▸ WEB APPLICATION TESTING", "orange")
+        self.cprint("─" * 80, "dim")
+        self.cprint("    httpvuln <url>                    Scan HTTP security headers for", "dim")
+        self.cprint("                                      misconfigurations (HSTS, CSP, XSS,", "dim")
+        self.cprint("                                      clickjacking, cookie flags)", "dim")
+        self.cprint("    dirbust <url>                     Brute-force hidden directories", "dim")
+        self.cprint("                                      (/admin, /api, /.git, /.env, etc.)", "dim")
+        self.cprint("    brute <url>                       HTTP Basic Auth credential attack", "dim")
+        self.cprint("                                      Tests 16 usernames x 32 passwords", "dim")
+        self.cprint("    subdomain <domain>                Enumerate subdomains (www, mail,", "dim")
+        self.cprint("                                      api, vpn, admin, dev, staging...)", "dim")
+        self.cprint("    dns <domain>                      Full DNS record enumeration", "dim")
+        self.cprint("                                      (A, AAAA, MX, NS, TXT, CNAME, SOA)", "dim")
+        self.cprint("    proxy <url>                       Launch stealth proxy server and", "dim")
+        self.cprint("                                      open target URL in local browser", "dim")
+        self.cprint("    whois <domain|ip>                 WHOIS + GeoIP + HTTP header lookup", "dim")
+        self.cprint("    lookup <ip|domain>                OSINT: GeoIP, ISP, ASN, reverse DNS", "dim")
+        self.cprint("", "dim")
+        self.cprint("─" * 80, "dim")
+        self.cprint("  ▸ CRYPTOGRAPHY & HASHING", "purple")
+        self.cprint("─" * 80, "dim")
+        self.cprint("    hash <hash_value> [type]          Dictionary crack (MD5/SHA1/SHA256)", "dim")
+        self.cprint("    hashcat <hash> [type]             Advanced CPU cracker with mutations", "dim")
+        self.cprint("                                      (rules, leet, suffixes, numbers)", "dim")
+        self.cprint("                                      Auto-detects type by hash length", "dim")
+        self.cprint("    hashid <hash>                     Identify hash type + AI analysis", "dim")
+        self.cprint("    codec <text>                      Encode/decode text to Base64, Hex,", "dim")
+        self.cprint("                                      MD5, SHA1, SHA256, ROT13, URL", "dim")
+        self.cprint("    encrypt <filepath>                AES-256 encrypt a file (Fernet)", "dim")
+        self.cprint("                                      Outputs .enc file + decryption key", "dim")
+        self.cprint("    decrypt <filepath> <key>          Decrypt a .enc file with key", "dim")
+        self.cprint("    bruteforce <mode> [maxlen]        Sequential brute-force generator", "dim")
+        self.cprint("      Modes: lower, alpha, alnum,    Tries EVERY combination from 1 to", "dim")
+        self.cprint("             alnumsym, all            maxlen digits (default: 4)", "dim")
+        self.cprint("      lower    = a-z", "dim")
+        self.cprint("      alpha    = a-z A-Z", "dim")
+        self.cprint("      alnum    = a-z A-Z 0-9", "dim")
+        self.cprint("      alnumsym = a-z A-Z 0-9 !$#*", "dim")
+        self.cprint("      all      = a-z A-Z 0-9 + all symbols", "dim")
+        self.cprint("", "dim")
+        self.cprint("─" * 80, "dim")
+        self.cprint("  ▸ SYSTEM & RECON", "white")
+        self.cprint("─" * 80, "dim")
+        self.cprint("    dump                              Full system diagnostic: OS, CPU,", "dim")
+        self.cprint("                                      RAM, GPU, disk, network interfaces", "dim")
+        self.cprint("    whoami                            Current user context, privileges,", "dim")
+        self.cprint("                                      domain, session info", "dim")
+        self.cprint("    passgen <word>                    Generate password mutations from a", "dim")
+        self.cprint("                                      base word (leet, suffixes, caps)", "dim")
+        self.cprint("    status                            Show AI provider, API key status,", "dim")
+        self.cprint("                                      and Scapy availability", "dim")
+        self.cprint("", "dim")
+        self.cprint("─" * 80, "dim")
+        self.cprint("  ▸ AI & SESSION", "accent")
+        self.cprint("─" * 80, "dim")
+        self.cprint("    model                             Show current AI model", "dim")
+        self.cprint("    model list                        List all available AI models", "dim")
+        self.cprint("    model <name>                      Switch to a different model", "dim")
+        self.cprint("    model key <api_key>               Set the Groq API key", "dim")
+        self.cprint("    setkey <api_key>                  Shortcut to set Groq API key", "dim")
+        self.cprint("    history                           Show last 25 commands entered", "dim")
+        self.cprint("    export [filename]                 Save terminal output to a file", "dim")
+        self.cprint("    usage <command>                   Show detailed tactical manual for", "dim")
+        self.cprint("                                      a specific command", "dim")
+        self.cprint("    manual                            Interactive field training guide", "dim")
+        self.cprint("                                      with scenario walkthroughs", "dim")
+        self.cprint("", "dim")
+        self.cprint("─" * 80, "dim")
+        self.cprint("  ▸ CONTROLS", "yellow")
+        self.cprint("─" * 80, "dim")
+        self.cprint("    help                              This reference (you are here)", "dim")
+        self.cprint("    clear                             Clear the terminal screen", "dim")
+        self.cprint("    kill                              Stop all running background jobs", "dim")
+        self.cprint("    exit                              Quit TechBot A1", "dim")
+        self.cprint("", "dim")
+        self.cprint("─" * 80, "dim")
+        self.cprint("  KEYBOARD SHORTCUTS:", "yellow")
+        self.cprint("    Ctrl+L          Kill all running operations immediately", "dim")
+        self.cprint("    Tab             Autocomplete current command", "dim")
+        self.cprint("    Up / Down       Navigate command history", "dim")
+        self.cprint("    Enter           Execute command", "dim")
+        self.cprint("", "dim")
+        self.cprint("  TIPS:", "yellow")
+        self.cprint("    • Run 'techbot usage <cmd>' for deep tactical documentation", "dim")
+        self.cprint("    • Run 'techbot manual' for guided attack scenarios", "dim")
+        self.cprint("    • Many tools require Administrator/root privileges", "dim")
+        self.cprint("    • The right panel shows live network topology, system gauges,", "dim")
+        self.cprint("      packet captures, and geo-targeting data in real time", "dim")
+        self.cprint("    • Code blocks from AI responses are click-to-copy", "dim")
         self.cprint("═"*80 + "\n", "dim")
 
     # ===== AI =====
@@ -3165,66 +3424,170 @@ class TechBotGUI(ctk.CTk):
         except: pass
 
     def _init_map_nodes(self):
-        """Initialize force-directed graph nodes"""
-        self.nodes = [{'x': 150, 'y': 100, 'vx': 0, 'vy': 0, 'label': 'LOCALHOST', 'type': 'root'}]
-        for i in range(5):
-            self.nodes.append({
-                'x': random.randint(50, 250),
-                'y': random.randint(50, 150),
-                'vx': 0, 'vy': 0, 
-                'label': f"192.168.1.{random.randint(2, 254)}",
-                'type': 'node'
-            })
+        """Initialize topology with real network data from system connections and ARP"""
+        my_ip = get_local_ip()
+        hostname = socket.gethostname()
+        self.nodes = [{'x': 150, 'y': 100, 'vx': 0, 'vy': 0, 'label': f'{hostname}\n{my_ip}', 'type': 'root'}]
+
+        # Populate with real data: get unique remote IPs from established connections
+        seen_ips = {my_ip, '127.0.0.1', '0.0.0.0', '::1'}
+        try:
+            for conn in psutil.net_connections(kind='inet'):
+                if conn.raddr and conn.status == 'ESTABLISHED':
+                    rip = conn.raddr.ip
+                    if rip not in seen_ips and not rip.startswith('::'):
+                        seen_ips.add(rip)
+                        is_local = rip.startswith('192.168.') or rip.startswith('10.') or rip.startswith('172.')
+                        self.nodes.append({
+                            'x': random.randint(40, 260),
+                            'y': random.randint(30, 170),
+                            'vx': 0, 'vy': 0,
+                            'label': rip,
+                            'type': 'local' if is_local else 'remote'
+                        })
+                        if len(self.nodes) >= 15:
+                            break
+        except Exception:
+            pass
+
+        # Try to get gateway
+        try:
+            if os.name == 'nt':
+                result = subprocess.check_output('ipconfig', text=True, timeout=3,
+                                                 creationflags=subprocess.CREATE_NO_WINDOW)
+                for line in result.split('\n'):
+                    if 'Default Gateway' in line and ':' in line:
+                        gw = line.split(':')[-1].strip()
+                        if gw and gw not in seen_ips:
+                            seen_ips.add(gw)
+                            self.nodes.insert(1, {
+                                'x': 150, 'y': 30, 'vx': 0, 'vy': 0,
+                                'label': f'GW\n{gw}', 'type': 'gateway'
+                            })
+                            break
+        except Exception:
+            pass
+
+        # If we still have very few nodes, also check ARP table
+        if len(self.nodes) < 5:
+            try:
+                arp_out = subprocess.check_output('arp -a', shell=True, text=True, timeout=3)
+                for line in arp_out.split('\n'):
+                    match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
+                    if match:
+                        ip = match.group(1)
+                        if ip not in seen_ips and not ip.endswith('.255'):
+                            seen_ips.add(ip)
+                            self.nodes.append({
+                                'x': random.randint(40, 260),
+                                'y': random.randint(30, 170),
+                                'vx': 0, 'vy': 0,
+                                'label': ip,
+                                'type': 'local'
+                            })
+                            if len(self.nodes) >= 12:
+                                break
+            except Exception:
+                pass
+
+        # Store discovered devices for use elsewhere
+        self._topology_devices = [n for n in self.nodes if n['type'] != 'root']
 
     def _update_map(self):
-        """Physics-based Vector Map Animation"""
+        """Physics-based Vector Map Animation with real network data"""
         try:
             c = self.map_canvas
             c.delete("all")
-            
-            # Physics
+            w = c.winfo_width() or 300
+            h = c.winfo_height() or 200
+
+            if not self.nodes:
+                c.create_text(w // 2, h // 2, text="NO NETWORK DATA", fill=FG_DIM, font=(FONT, 8))
+                return
+
+            # Subtle grid background
+            for gx in range(0, w, 30):
+                c.create_line(gx, 0, gx, h, fill="#0a0a14", width=1)
+            for gy in range(0, h, 30):
+                c.create_line(0, gy, w, gy, fill="#0a0a14", width=1)
+
             center = self.nodes[0]
+
             for i, n in enumerate(self.nodes):
                 # Repulsion from other nodes
                 for other in self.nodes:
-                    if n == other: continue
+                    if n is other:
+                        continue
                     dx, dy = n['x'] - other['x'], n['y'] - other['y']
                     dist = math.hypot(dx, dy) or 1
-                    force = 500 / (dist**2)
-                    n['vx'] += (dx/dist) * force
-                    n['vy'] += (dy/dist) * force
-                
+                    force = 400 / (dist ** 2)
+                    n['vx'] += (dx / dist) * force
+                    n['vy'] += (dy / dist) * force
+
                 # Attraction to center
-                if n != center:
+                if n is not center:
                     dx, dy = center['x'] - n['x'], center['y'] - n['y']
                     dist = math.hypot(dx, dy) or 1
-                    n['vx'] += (dx/dist) * 0.5
-                    n['vy'] += (dy/dist) * 0.5
-                
+                    n['vx'] += (dx / dist) * 0.4
+                    n['vy'] += (dy / dist) * 0.4
+
                 # Damping
-                n['vx'] *= 0.9
-                n['vy'] *= 0.9
+                n['vx'] *= 0.85
+                n['vy'] *= 0.85
                 n['x'] += n['vx']
                 n['y'] += n['vy']
-                
+
                 # Bounds
-                n['x'] = max(20, min(280, n['x']))
-                n['y'] = max(20, min(180, n['y']))
-                
-                # Draw connections
-                if n != center:
-                    # Pulse effect
-                    width = random.randint(1, 3) if random.random() > 0.8 else 1
-                    col = "#00ff00" if random.random() > 0.95 else "#004400"
-                    c.create_line(center['x'], center['y'], n['x'], n['y'], fill=col, width=width)
-                
+                n['x'] = max(25, min(w - 25, n['x']))
+                n['y'] = max(20, min(h - 20, n['y']))
+
+                # Draw connections to root
+                if n is not center:
+                    # Animated pulse on random connections
+                    pulse = random.random() > 0.85
+                    line_width = 2 if pulse else 1
+                    if n['type'] == 'gateway':
+                        line_col = ACCENT if pulse else "#003322"
+                    elif n['type'] == 'local':
+                        line_col = CYAN if pulse else "#001833"
+                    else:
+                        line_col = PURPLE if pulse else "#180033"
+                    c.create_line(center['x'], center['y'], n['x'], n['y'],
+                                  fill=line_col, width=line_width, dash=(4, 2) if not pulse else ())
+
+                    # Data flow indicator (small dot moving along connection)
+                    if pulse:
+                        t = (time.time() * 2) % 1
+                        px = center['x'] + (n['x'] - center['x']) * t
+                        py = center['y'] + (n['y'] - center['y']) * t
+                        c.create_oval(px - 2, py - 2, px + 2, py + 2, fill="#ffffff", outline="")
+
                 # Draw node
-                col = ACCENT if n['type'] == 'root' else CYAN
-                r = 4 if n['type'] == 'root' else 2
-                c.create_oval(n['x']-r, n['y']-r, n['x']+r, n['y']+r, fill=col, outline=col)
-                c.create_text(n['x'], n['y']-10, text=n['label'], fill=FG_DIM, font=(FONT, 6))
-                
-        except: pass
+                if n['type'] == 'root':
+                    r = 6
+                    col = ACCENT
+                    c.create_oval(n['x'] - r - 3, n['y'] - r - 3, n['x'] + r + 3, n['y'] + r + 3,
+                                  outline=ACCENT, width=1, dash=(2, 2))
+                elif n['type'] == 'gateway':
+                    r = 5
+                    col = YELLOW
+                elif n['type'] == 'local':
+                    r = 3
+                    col = CYAN
+                else:
+                    r = 3
+                    col = PURPLE
+
+                c.create_oval(n['x'] - r, n['y'] - r, n['x'] + r, n['y'] + r, fill=col, outline=col)
+                c.create_text(n['x'], n['y'] - r - 7, text=n['label'], fill=FG_DIM,
+                              font=(FONT, 6), justify="center")
+
+            # Legend
+            c.create_text(8, h - 8, text=f"NODES: {len(self.nodes)}", fill=FG_DIM,
+                          font=(FONT, 6), anchor="w")
+
+        except Exception:
+            pass
 
     def _draw_entropy(self):
         """Spectral Waveform Visualization"""
@@ -3376,6 +3739,178 @@ class TechBotGUI(ctk.CTk):
             time.sleep(5)
 
 
+    def tool_bssid_scan(self):
+        """Scan BSSIDs — equivalent to 'netsh wlan show networks mode=Bssid'"""
+        self.cprint("\n  ╔════════════════════════════════════════════════════════════╗", "cyan")
+        self.cprint("  ║         ██  BSSID NETWORK SCANNER  ██                     ║", "cyan")
+        self.cprint("  ╚════════════════════════════════════════════════════════════╝", "cyan")
+        self.cprint("  [*] Scanning all visible BSSIDs... (may take a few seconds)\n", "yellow")
+        self.set_status("BSSID SCAN...", CYAN)
+
+        def _t():
+            networks = scan_bssid_networks()
+            if not networks:
+                self.cprint("  [!] No networks found or WiFi adapter unavailable.", "red")
+                self.set_status("IDLE", FG)
+                return
+
+            if networks and 'ERROR' in str(networks[0].get('ssid', '')):
+                self.cprint(f"  [!] {networks[0]['ssid']}", "red")
+                self.set_status("IDLE", FG)
+                return
+
+            self.cprint(f"  {'#':>3}  {'SSID':<25} {'BSSID':<20} {'SIG':>6}  {'AUTH':<18} {'ENC':<10} {'CH':>4}  {'RADIO'}", "dim")
+            self.cprint("  " + "─" * 110, "dim")
+
+            for idx, net in enumerate(networks):
+                ssid = str(net.get('ssid', '[HIDDEN]'))[:24]
+                bssid = str(net.get('bssid', 'N/A'))[:19]
+                sig = net.get('signal', 0)
+                auth = str(net.get('auth', '?'))[:17]
+                enc = str(net.get('encryption', '?'))[:9]
+                ch = str(net.get('channel', '?'))
+                radio = str(net.get('radio', '?'))
+                ntype = str(net.get('network_type', '?'))
+
+                # Color by signal strength
+                if isinstance(sig, int):
+                    if sig >= 70:
+                        tag = "green"
+                    elif sig >= 40:
+                        tag = "yellow"
+                    else:
+                        tag = "red"
+                    sig_str = f"{sig}%"
+                else:
+                    tag = "dim"
+                    sig_str = str(sig)
+
+                self.cprint(f"  {idx+1:>3}  {ssid:<25} {bssid:<20} {sig_str:>6}  {auth:<18} {enc:<10} {ch:>4}  {radio}", tag)
+
+            self.cprint(f"\n  [+] {len(networks)} BSSID(s) detected", "cyan")
+            self.set_status("IDLE", FG)
+
+        threading.Thread(target=_t, daemon=True).start()
+
+    def tool_bruteforce_gen(self, args=None):
+        """Sequential brute-force generator with selectable character sets"""
+        self.cprint("\n  ╔════════════════════════════════════════════════════════════╗", "red")
+        self.cprint("  ║         ██  SEQUENTIAL BRUTE-FORCE ENGINE  ██             ║", "red")
+        self.cprint("  ╚════════════════════════════════════════════════════════════╝", "red")
+
+        if not args or len(args) < 1:
+            self.cprint("", "dim")
+            self.cprint("  Usage: techbot bruteforce <mode> [maxlen] [target_hash] [hash_type]", "yellow")
+            self.cprint("", "dim")
+            self.cprint("  Modes:", "cyan")
+            self.cprint("    lower      a-z only                       (26 chars)", "dim")
+            self.cprint("    alpha      a-z A-Z                        (52 chars)", "dim")
+            self.cprint("    alnum      a-z A-Z 0-9                    (62 chars)", "dim")
+            self.cprint("    alnumsym   a-z A-Z 0-9 ! $ # *           (66 chars)", "dim")
+            self.cprint("    all        a-z A-Z 0-9 + all symbols      (95 chars)", "dim")
+            self.cprint("", "dim")
+            self.cprint("  Examples:", "cyan")
+            self.cprint("    techbot bruteforce lower 4              Generate all lowercase 1-4 char combos", "dim")
+            self.cprint("    techbot bruteforce alnum 6 <md5hash>    Crack MD5 hash with alphanumeric brute", "dim")
+            self.cprint("    techbot bruteforce alnumsym 5           Generate all letter+num+!$#* combos", "dim")
+            self.cprint("", "dim")
+            self.cprint("  WARNING: Length > 5 with large charsets will take a VERY long time.", "red")
+            self.cprint("  Use Ctrl+L to abort at any time.", "dim")
+            return
+
+        mode = args[0].lower()
+        valid_modes = ['lower', 'alpha', 'alnum', 'alnumsym', 'all']
+        if mode not in valid_modes:
+            self.cprint(f"  [!] Unknown mode: '{mode}'", "red")
+            self.cprint(f"  [*] Valid modes: {', '.join(valid_modes)}", "dim")
+            return
+
+        max_len = 4
+        if len(args) > 1:
+            try:
+                max_len = int(args[1])
+                if max_len < 1 or max_len > 10:
+                    self.cprint("  [!] Max length must be between 1 and 10", "red")
+                    return
+            except ValueError:
+                self.cprint("  [!] Invalid max length — must be a number", "red")
+                return
+
+        # Optional hash cracking target
+        target_hash = None
+        hash_type = 'md5'
+        if len(args) > 2:
+            target_hash = args[2].strip().lower()
+            if len(args) > 3:
+                hash_type = args[3].strip().lower()
+            else:
+                hash_type = hashcat_detect_type(target_hash)
+
+        # Calculate total combinations
+        charsets = {
+            'lower':    string.ascii_lowercase,
+            'alpha':    string.ascii_letters,
+            'alnum':    string.ascii_letters + string.digits,
+            'alnumsym': string.ascii_letters + string.digits + '!$#*',
+            'all':      string.ascii_letters + string.digits + string.punctuation,
+        }
+        chars = charsets[mode]
+        total = sum(len(chars) ** l for l in range(1, max_len + 1))
+
+        self.cprint(f"\n  ╔══════════════════════════════════════════════╗", "cyan")
+        self.cprint(f"  ║  MODE:     {mode.upper():<35}║", "cyan")
+        self.cprint(f"  ║  CHARSET:  {len(chars)} characters{' '*24}║", "cyan")
+        self.cprint(f"  ║  MAX LEN:  {max_len:<35}║", "cyan")
+        self.cprint(f"  ║  TOTAL:    {total:>12,} combinations{' '*13}║", "cyan")
+        if target_hash:
+            self.cprint(f"  ║  TARGET:   {target_hash[:35]:<35}║", "cyan")
+            self.cprint(f"  ║  HASH:     {hash_type.upper():<35}║", "cyan")
+        self.cprint(f"  ╚══════════════════════════════════════════════╝\n", "cyan")
+
+        if total > 100000000 and not target_hash:
+            self.cprint("  [!] WARNING: Over 100M combinations without a target hash.", "red")
+            self.cprint("  [!] This will only enumerate — no matching. Consider adding a hash target.", "yellow")
+
+        self.set_status(f"BRUTEFORCE {mode.upper()}", RED)
+        STOP_EVENT.clear()
+        self._bf_stop = [False]
+
+        def _check(candidate):
+            if not target_hash:
+                return False
+            h = hashcat_compute(candidate, hash_type)
+            return h == target_hash
+
+        def _cb(msg):
+            self.cprint(msg, "yellow")
+
+        def _done(result, tested, elapsed):
+            rate = tested / elapsed if elapsed > 0 else 0
+            self.cprint(f"\n  ╔══════════════════════════════════════════════╗", "dim")
+            self.cprint(f"  ║  BRUTE-FORCE COMPLETE                        ║", "dim")
+            self.cprint(f"  ║  Tested:   {tested:>12,} candidates         ║", "dim")
+            self.cprint(f"  ║  Speed:    {rate:>12,.0f} /s                 ║", "dim")
+            self.cprint(f"  ║  Time:     {elapsed:>12.1f}s                 ║", "dim")
+            self.cprint(f"  ╚══════════════════════════════════════════════╝", "dim")
+
+            if result:
+                self.cprint("", "green")
+                self.cprint("  ██████████████████████████████████████████████", "green")
+                self.cprint(f"  ██  CRACKED:  {result:<31}██", "green")
+                self.cprint(f"  ██  TYPE:     {hash_type.upper():<31}██", "green")
+                self.cprint("  ██████████████████████████████████████████████", "green")
+            elif target_hash:
+                self.cprint("\n  [-] Exhausted all combinations. No match found.", "red")
+            else:
+                self.cprint(f"\n  [+] Enumeration complete. {tested:,} candidates generated.", "green")
+            self.set_status("IDLE", FG)
+
+        target_fn = _check if target_hash else None
+        threading.Thread(
+            target=bruteforce_generator,
+            args=(mode, max_len, target_fn, _cb, _done, self._bf_stop),
+            daemon=True
+        ).start()
 
     def destroy(self):
         self.running = False
@@ -3960,46 +4495,64 @@ class TechBotGUI(ctk.CTk):
     def glitch_intro(self):
         """Cinematic Glitch Boot Sequence - v10.0 Professional"""
         logo = [
-            "████████╗███████╗ ██████╗██╗  ██╗██████╗  ██████╗ ████████╗",
-            "╚══██╔══╝██╔════╝██╔════╝██║  ██║██╔══██╗██╔═══██╗╚══██╔══╝",
-            "   ██║   █████╗  ██║     ███████║██████╔╝██║   ██║   ██║   ",
-            "   ██║   ██╔══╝  ██║     ██╔══██║██╔══██╗██║   ██║   ██║   ",
-            "   ██║   ███████╗╚██████╗██║  ██║██████╔╝╚██████╔╝   ██║   ",
-            "   ╚═╝   ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═════╝  ╚═════╝    ╚═╝   "
+            "",
+            "  ████████╗███████╗ ██████╗██╗  ██╗██████╗  ██████╗ ████████╗     █████╗  ██╗",
+            "  ╚══██╔══╝██╔════╝██╔════╝██║  ██║██╔══██╗██╔═══██╗╚══██╔══╝    ██╔══██╗███║",
+            "     ██║   █████╗  ██║     ███████║██████╔╝██║   ██║   ██║       ███████║╚██║",
+            "     ██║   ██╔══╝  ██║     ██╔══██║██╔══██╗██║   ██║   ██║       ██╔══██║ ██║",
+            "     ██║   ███████╗╚██████╗██║  ██║██████╔╝╚██████╔╝   ██║       ██║  ██║ ██║",
+            "     ╚═╝   ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═════╝  ╚═════╝    ╚═╝       ╚═╝  ╚═╝ ╚═╝",
+            "",
+            "         ╔══════════════════════════════════════════════════════════╗",
+            "         ║   P H A N T O M   O P S   //   R E D   T E A M   v10  ║",
+            "         ╚══════════════════════════════════════════════════════════╝",
+            "",
         ]
-        
-        # Phase 1: CRT Warmup (Line by line render)
-        def _phase1():
-            self.cprint("\n", "dim")
-            delay = 0
-            for line in logo:
-                self.after(delay, lambda l=line: self.console.insert("end", "  " + l + "\n", "cyan"))
-                delay += 80
-            self.after(delay + 200, _phase2)
 
-        # Phase 2: System Check & Flash
-        def _phase2():
-            msgs = [
-                "  > BIOS CHECK............ [OK]",
-                "  > MEMORY INTEGRITY...... [PASS]",
-                "  > LOADING KERNEL........ [SUCCESS]",
-                "  > MOUNTING FILES........ [RW]"
-            ]
-            for i, m in enumerate(msgs):
-                self.after(i*150, lambda t=m: self.cprint(t, "dim"))
-            
-            self.after(800, _phase3)
+        boot_msgs = [
+            ("  [SYS]  BIOS INTEGRITY CHECK .............. ", "[OK]",      "dim",    "green"),
+            ("  [SYS]  MEMORY ALLOCATION ................. ", "[4096 MB]", "dim",    "green"),
+            ("  [SYS]  KERNEL MODULE LOADER .............. ", "[LOADED]",  "dim",    "green"),
+            ("  [SYS]  FILESYSTEM MOUNT .................. ", "[RW]",      "dim",    "green"),
+            ("  [NET]  NETWORK INTERFACE BIND ............ ", "[BOUND]",   "dim",    "cyan"),
+            ("  [NET]  SCAPY ENGINE ...................... ", "[OK]" if SCAPY_AVAILABLE else "[MISSING]", "dim", "green" if SCAPY_AVAILABLE else "red"),
+            ("  [AI ]  GROQ LLM PROVIDER ................. ", "[OK]" if GROQ_AVAILABLE else "[NO KEY]", "dim", "green" if GROQ_AVAILABLE else "yellow"),
+            ("  [SEC]  CRYPTO ENGINE (FERNET AES-256) .... ", "[READY]",   "dim",    "green"),
+            ("  [GUI]  PHANTOM OPS INTERFACE ............. ", "[ONLINE]",  "dim",    "accent"),
+        ]
 
-        # Phase 3: Launch
+        # Phase 1: Logo render line by line
+        def _phase1(idx=0):
+            if idx < len(logo):
+                self.instant_print(logo[idx], "logo")
+                self.after(60, lambda: _phase1(idx + 1))
+            else:
+                self.instant_print("", "dim")
+                self.after(200, lambda: _phase2(0))
+
+        # Phase 2: System checks line by line
+        def _phase2(idx=0):
+            if idx < len(boot_msgs):
+                prefix, status, ptag, stag = boot_msgs[idx]
+                self.instant_print(prefix + status, stag)
+                self.after(100, lambda: _phase2(idx + 1))
+            else:
+                self.after(300, _phase3)
+
+        # Phase 3: Final launch banner
         def _phase3():
-            self.cprint("\n  [*] TECHBOT v10.0 | PHANTOM OPS | READY", "accent")
-            self.set_status("READY", ACCENT)
+            self.instant_print("", "dim")
+            self.instant_print("  ════════════════════════════════════════════════════════════════", "dim")
+            self.instant_print("  ██  ALL SYSTEMS NOMINAL  ██  TECHBOT A1 v10.0  ██  PHANTOM OPS", "accent")
+            self.instant_print("  ════════════════════════════════════════════════════════════════", "dim")
+            self.instant_print("", "dim")
+            self.instant_print("  Type 'techbot help' for the full command reference.", "yellow")
+            self.instant_print("  Type any text without 'techbot' prefix to chat with AI.", "dim")
+            self.instant_print("", "dim")
+            self.set_status("● READY", ACCENT)
             self.entry.focus_set()
-            
-        self.after(100, _phase1)
 
-    def _logo_flicker(self, line):
-        pass # Deprecated
+        self.after(100, lambda: _phase1(0))
 
 if __name__ == "__main__":
     app = TechBotGUI()
