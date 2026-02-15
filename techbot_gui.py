@@ -1985,14 +1985,13 @@ class TechBotGUI(ctk.CTk):
 
         # ========== LAYOUT ==========
         self.grid_rowconfigure(0, weight=0)  # Top bar
-        self.grid_rowconfigure(1, weight=1)  # Main content
+        self.grid_rowconfigure(1, weight=1)  # Main content (full width)
         self.grid_rowconfigure(2, weight=0)  # Bottom bar
-        self.grid_columnconfigure(0, weight=1)  # Terminal
-        self.grid_columnconfigure(1, weight=0)  # Right panel
+        self.grid_columnconfigure(0, weight=1)  # Terminal (full width)
 
         # ═══════ TOP BAR ═══════
         self.topbar = ctk.CTkFrame(self, fg_color=BG2, height=40, corner_radius=0, border_color=BORDER, border_width=1)
-        self.topbar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.topbar.grid(row=0, column=0, sticky="ew")
         self.topbar.grid_propagate(False)
 
         ctk.CTkLabel(self.topbar, text="◆ TECHBOT A1", text_color=ACCENT, font=(FONT, 13, "bold")).pack(side="left", padx=15)
@@ -2013,14 +2012,6 @@ class TechBotGUI(ctk.CTk):
         self.lbl_status = ctk.CTkLabel(self.topbar, text="● READY", text_color=ACCENT, font=(FONT, 11, "bold"))
         self.lbl_status.pack(side="right", padx=10)
 
-        # Audio toggle in top bar
-        self.btn_audio = ctk.CTkButton(self.topbar, text="🎙 OFF", fg_color="#1a0010",
-                                       hover_color="#2a0018", text_color=RED, font=(FONT, 9, "bold"),
-                                       width=75, height=28, corner_radius=6,
-                                       border_width=1, border_color="#330015",
-                                       command=self.toggle_voice)
-        self.btn_audio.pack(side="right", padx=4)
-
         # AI model indicator in top bar
         self.lbl_model = ctk.CTkLabel(self.topbar, text=f"AI:{MODEL.split('/')[-1][:20]}", text_color=FG_DIM, font=(FONT, 8))
         self.lbl_model.pack(side="right", padx=6)
@@ -2028,7 +2019,7 @@ class TechBotGUI(ctk.CTk):
 
         # ═══════ TERMINAL ═══════
         self.center = ctk.CTkFrame(self, fg_color=BG, border_color=BORDER, border_width=1, corner_radius=0)
-        self.center.grid(row=1, column=0, sticky="nsew", padx=(4,2), pady=4)
+        self.center.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
 
         # Terminal header
         hdr = ctk.CTkFrame(self.center, fg_color=BG2, height=32, corner_radius=0, border_color=BORDER, border_width=1)
@@ -2083,85 +2074,17 @@ class TechBotGUI(ctk.CTk):
         self._glow_dir = -0.05
         self.after(100, self._update_ui_glow)
 
-        # ═══════ RIGHT PANEL (WAR ROOM MFD) ═══════
-        self.right = ctk.CTkFrame(self, fg_color=BG2, width=340, corner_radius=0, border_color=BORDER, border_width=1)
-        self.right.grid(row=1, column=1, sticky="nsew", padx=(0,4), pady=4)
-        self.right.grid_propagate(False)
-        
-        # MFD Header
-        ctk.CTkLabel(self.right, text="❖ TACTICAL MFD", text_color=ACCENT, font=(FONT, 11, "bold")).pack(fill="x", pady=(8,2))
-        
-        # Tabs: OPS (Map), INTEL (Sniffer), SYS (Status)
-        self.tabs = ctk.CTkTabview(self.right, fg_color="transparent", bg_color="transparent", 
-                                   corner_radius=0, width=300, height=800,
-                                   segmented_button_fg_color=BG, segmented_button_selected_color="#1a1a2a",
-                                   segmented_button_selected_hover_color="#2a2a3a", segmented_button_unselected_color=BG,
-                                   text_color=FG_DIM, text_color_disabled="#333")
-        self.tabs.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        self.tab_ops = self.tabs.add("OPS")
-        self.tab_intel = self.tabs.add("INTEL")
-        self.tab_sys = self.tabs.add("SYS")
-        
-        # --- TAB OPS: VECTOR MAP & NET I/O ---
-        self._section(self.tab_ops, "── NETWORK TOPOLOGY ──")
-        self.map_canvas = tk.Canvas(self.tab_ops, bg=BG, height=200, highlightthickness=0)
-        self.map_canvas.pack(fill="x", padx=5, pady=5)
-        self.nodes = [] # format: {'x', 'y', 'vx', 'vy', 'label', 'type'}
-        
-        self._section(self.tab_ops, "── NET I/O ──")
-        self.net_frame = ctk.CTkFrame(self.tab_ops, fg_color="transparent")
-        self.net_frame.pack(fill="x", padx=4, pady=2)
-        self.lbl_net = ctk.CTkLabel(self.net_frame, text="TRAFFIC [0 KB/s]", text_color=CYAN, font=(FONT, 9, "bold"))
-        self.lbl_net.pack(anchor="w")
-        self.net_canvas = tk.Canvas(self.net_frame, bg=BG, height=40, highlightthickness=0)
-        self.net_canvas.pack(fill="x", pady=2)
-        
-        self._section(self.tab_ops, "── LIVE CONNECTIONS ──")
-        self.conn_frame = ctk.CTkFrame(self.tab_ops, fg_color=BG, corner_radius=4)
-        self.conn_frame.pack(fill="both", expand=True, padx=4, pady=(0,4))
-        self.live_conn_text = tk.Text(self.conn_frame, bg=BG, fg=FG_DIM, font=(FONT, 8), bd=0,
-                                      wrap="none", padx=4, pady=4, state="disabled")
-        self.live_conn_text.pack(fill="both", expand=True)
-        # Tags for conn text
-        self.live_conn_text.tag_config("hdr", foreground=ACCENT)
-        self.live_conn_text.tag_config("est", foreground=SUCCESS)
-        self.live_conn_text.tag_config("listen", foreground=YELLOW)
-        self.live_conn_text.tag_config("other", foreground=FG_DIM)
-
-        # --- TAB INTEL: SNIFFER & GEO ---
-        self._section(self.tab_intel, "── PACKET SCOPE ──")
-        self.sniff_text = tk.Text(self.tab_intel, bg="#050510", fg="#33ff33", font=("Consolas", 8), height=15, bd=0)
-        self.sniff_text.pack(fill="x", padx=5, pady=5)
-        self.sniff_text.insert("1.0", "[*] WAITING FOR TRAFFIC...\n")
-        self.sniff_text.tag_config("http", foreground="orange", background="#221100")
-        self.sniff_text.tag_config("pass", foreground="red", background="#330000")
-        self.sniff_text.config(state="disabled")
-
-        self._section(self.tab_intel, "── GEO-TARGETING ──")
-        self.geo_frame = ctk.CTkFrame(self.tab_intel, fg_color=BG, corner_radius=4)
-        self.geo_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        self.geo_lbl = ctk.CTkLabel(self.geo_frame, text="NO ACTIVE TARGET", text_color=FG_DIM, font=(FONT, 10), justify="left")
-        self.geo_lbl.pack(fill="both", expand=True, padx=10, pady=10)
-
-        # --- TAB SYS: WATCHDOG & ENTROPY ---
-        self._section(self.tab_sys, "── WATCHDOG ──")
-        
-        # Radial Gauges (Canvas)
-        self.gauge_canvas = tk.Canvas(self.tab_sys, bg=BG, height=100, highlightthickness=0)
-        self.gauge_canvas.pack(fill="x", padx=5, pady=5)
-        
+        # Data for monitoring (no sidebar - these power the apps)
+        self.nodes = []
         self.cpu_data = deque([0]*100, maxlen=100)
         self.ram_data = deque([0]*100, maxlen=100)
-        
-        self._section(self.tab_sys, "── ENTROPY POOL ──")
-        self.entropy_canvas = tk.Canvas(self.tab_sys, bg=BG, height=60, highlightthickness=0)
-        self.entropy_canvas.pack(fill="x", padx=5, pady=5)
+        self._app_window = None  # Current app overlay
+        self._geo_cache = {}  # Cache for geo lookups
 
 
         # ═══════ BOTTOM BAR ═══════
         self.botbar = ctk.CTkFrame(self, fg_color=BG2, height=28, corner_radius=0, border_color=BORDER, border_width=1)
-        self.botbar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.botbar.grid(row=2, column=0, sticky="ew")
         self.botbar.grid_propagate(False)
         self.lbl_bot = ctk.CTkLabel(self.botbar, text="SYS: NOMINAL", text_color=FG_DIM, font=(FONT, 8))
         self.lbl_bot.pack(side="left", padx=15)
@@ -2249,7 +2172,15 @@ class TechBotGUI(ctk.CTk):
                 "techbot proxy", "techbot encrypt", "techbot decrypt", "techbot codec",
                 "techbot dump", "techbot passgen", "techbot hashid", "techbot dnsspoof",
                 "techbot gethash", "techbot banner", "techbot model", "techbot history",
-                "techbot export", "techbot usage", "techbot manual", "techbot kill"]
+                "techbot export", "techbot usage", "techbot manual", "techbot kill",
+                "techbot app", "techbot app worldmap", "techbot app monitor",
+                "techbot app nettraffic", "techbot app connections", "techbot app sniffer",
+                "techbot app geotarget", "techbot app entropy", "techbot app topology",
+                "techbot app portscanner", "techbot app wifiradar", "techbot app hashcracker",
+                "techbot app passwords", "techbot app firewall", "techbot app processes",
+                "techbot app hexeditor", "techbot app ipinfo", "techbot app calculator",
+                "techbot app notes", "techbot app exploits", "techbot app dashboard",
+                "techbot app voice"]
         match = ""
         for c in cmds:
             if c.startswith(val.lower()) and val.lower() != c:
@@ -2514,6 +2445,7 @@ class TechBotGUI(ctk.CTk):
             "export": self.tool_export,
             "bssid": self.tool_bssid_scan,
             "bruteforce": self.tool_bruteforce_gen,
+            "app": self.tool_app,
         }
         
         if base_cmd in commands:
@@ -2765,12 +2697,10 @@ class TechBotGUI(ctk.CTk):
     def toggle_voice(self):
         if self.voice_active:
             self.voice_active = False
-            self.btn_audio.configure(text="🎙 AUDIO OFF", text_color=RED)
             self.set_status("VOICE OFF", FG)
             self.cprint("  [*] Audio mode deactivated.", "dim")
         else:
             self.voice_active = True
-            self.btn_audio.configure(text="🎙 AUDIO ON", text_color=ACCENT)
             self.set_status("WAKE WORD...", YELLOW)
             self.cprint("  [*] Audio mode activated. Say 'Techbot' followed by your question.", "yellow")
             threading.Thread(target=self.voice_listen, daemon=True).start()
@@ -2814,7 +2744,6 @@ class TechBotGUI(ctk.CTk):
         except Exception as e:
             self.cprint(f"  [!] Mic failed: {e}", "red")
             self.voice_active = False
-            self.after(0, lambda: self.btn_audio.configure(text="🎙 AUDIO OFF", text_color=RED))
 
     # ===== REAL TOOLS =====
 
@@ -3614,9 +3543,6 @@ class TechBotGUI(ctk.CTk):
     def sys_loop(self):
         if not hasattr(self, 'nodes') or not self.nodes:
             self._init_map_nodes()
-            # Start threads
-            threading.Thread(target=self._sniffer_loop, daemon=True).start()
-            threading.Thread(target=self._geo_loop, daemon=True).start()
             
         while self.running:
             try:
@@ -3630,113 +3556,33 @@ class TechBotGUI(ctk.CTk):
                 bytes_delta = (cur_net.bytes_sent + cur_net.bytes_recv) - (self._last_net.bytes_sent + self._last_net.bytes_recv)
                 self._last_net = cur_net
                 kb_s = bytes_delta / 1024
-                
-                # 2. Update Visuals
-                self.after(0, self._draw_gauges)
-                self.after(0, self._update_map)
-                self.after(0, self._draw_entropy)
-                
-                # Net Graph (still exists in OPS tab)
                 self.net_data.append(min(kb_s, 5000))
-                self.after(0, lambda: self.draw_graph(self.net_canvas, self.net_data, CYAN))
-                self.after(0, lambda: self.lbl_net.configure(text=f"TRAFFIC [{kb_s:.0f} KB/s]"))
+                self._last_kb_s = kb_s
                 
-                # 3. Status Labels
+                # 2. Status Labels
                 elapsed = int(time.time() - self._start_time)
                 h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
                 
                 try:
                     conns = psutil.net_connections(kind='inet')
                     self.est_conns = [c for c in conns if c.status == 'ESTABLISHED']
-                    listen = [c for c in conns if c.status == 'LISTEN']
                     n_est = len(self.est_conns)
                 except:
-                    self.est_conns, listen, n_est = [], [], 0
+                    self.est_conns, n_est = [], 0
 
                 self.after(0, lambda: self.lbl_clock.configure(text=datetime.datetime.now().strftime("%H:%M:%S")))
                 self.after(0, lambda: self.lbl_bot_uptime.configure(text=f"UPTIME: {h:02d}:{m:02d}:{s:02d}"))
                 self.after(0, lambda: self.lbl_bot_conns.configure(text=f"ESTABLISHED: {n_est}"))
                 
-                # 4. Live Connections Feed
-                def _update_conns():
+                # 3. Update any open app windows
+                if self._app_window and hasattr(self._app_window, '_app_update'):
                     try:
-                        self.live_conn_text.config(state="normal")
-                        self.live_conn_text.delete("1.0", "end")
-                        self.live_conn_text.insert("end", f" EST:{n_est}  LISTEN:{len(listen)}\n", "hdr")
-                        self.live_conn_text.insert("end", " " + "─"*32 + "\n", "other")
-                        for c in self.est_conns[:8]:
-                            local = f"{c.laddr.ip}:{c.laddr.port}" if c.laddr else "?"
-                            remote = f"{c.raddr.ip}:{c.raddr.port}" if c.raddr else "?"
-                            self.live_conn_text.insert("end", f" {local[:18]}→{remote[:18]}\n", "est")
-                        self.live_conn_text.config(state="disabled")
+                        self.after(0, self._app_window._app_update)
                     except: pass
-                self.after(0, _update_conns)
                 
             except: pass
-            time.sleep(0.5) # Faster update rate for smooth animation
+            time.sleep(0.5)
 
-    def _sniffer_loop(self):
-        """Real-time Packet Sniffer (Requires Admin)"""
-        try:
-            from scapy.all import sniff
-            def pkt_callback(pkt):
-                if not self.running: return
-                try:
-                    summary = pkt.summary()
-                    # Hex dump logic
-                    raw_data = bytes(pkt)
-                    # Limit output to prevent spam
-                    hex_str = " ".join(f"{b:02x}" for b in raw_data[:12])
-                    ascii_str = "".join(chr(b) if 32 <= b < 127 else "." for b in raw_data[:12])
-                    
-                    line = f"{hex_str.ljust(36)} | {ascii_str}\n"
-                    
-                    def _safe_insert():
-                        self.sniff_text.config(state="normal")
-                        self.sniff_text.insert("1.0", line)
-                        if "HTTP" in summary:
-                            self.sniff_text.tag_add("http", "1.0", "1.end")
-                        self.sniff_text.delete("50.0", "end") # Keep buffer small
-                        self.sniff_text.config(state="disabled")
-                    self.after(0, _safe_insert)
-                except: pass
-
-            sniff(prn=pkt_callback, store=0, count=0)
-        except ImportError:
-            self.after(0, lambda: [self.sniff_text.config(state="normal"), 
-                                   self.sniff_text.insert("end", "[!] SCAPY NOT INSTALLED\n"),
-                                   self.sniff_text.config(state="disabled")])
-        except Exception as e:
-            msg = f"[!] SNIFFER ERROR: {e}\n[!] ADMIN PRIVILEGES REQUIRED\n"
-            self.after(0, lambda: [self.sniff_text.config(state="normal"), 
-                                   self.sniff_text.insert("end", msg),
-                                   self.sniff_text.config(state="disabled")])
-
-    def _geo_loop(self):
-        """Async Geo-IP Logic"""
-        import requests
-        while self.running:
-            try:
-                if hasattr(self, 'est_conns') and self.est_conns:
-                    # Pick a random target to analyze
-                    target = random.choice(self.est_conns)
-                    ip = target.raddr.ip if target.raddr else None
-                    if ip and ip != "127.0.0.1":
-                        try:
-                            # Use ip-api.com (free, no key)
-                            r = requests.get(f"http://ip-api.com/json/{ip}", timeout=3).json()
-                            if r['status'] == 'success':
-                                txt =  f"TARGET: {ip}\n"
-                                txt += f"LOC:    {r.get('city', '?').upper()}, {r.get('countryCode', '?')}\n"
-                                txt += f"ISP:    {r.get('isp', '?').upper()}\n"
-                                txt += f"LAT/LON:{r.get('lat')}/{r.get('lon')}\n"
-                                txt += f"THREAT: {'HIGH' if random.random()>0.8 else 'LOW'}"
-                                self.after(0, lambda t=txt: self.geo_lbl.configure(text=t, text_color=ACCENT))
-                        except: pass
-                else:
-                     self.after(0, lambda: self.geo_lbl.configure(text="NO ACTIVE TARGET\nSCANNING...", text_color=FG_DIM))
-            except: pass
-            time.sleep(5)
 
 
     def tool_bssid_scan(self):
