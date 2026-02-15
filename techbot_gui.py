@@ -77,23 +77,27 @@ Your Guidelines:
 6. If you are providing code, triple check to make sure it works without errors every time."""
 
 # ========== THEME (PHANTOM OPS) ==========
-BG       = "#020208"  # Abyss
-BG2      = "#0a0a12"  # Dark Navy
-BG3      = "#0f0f1a"  # Panel Dark
-FG       = "#c8d0d8"  # Ghost White
-FG_DIM   = "#4a5568"  # Slate
-ACCENT   = "#00ffaa"  # Matrix Green
-ACCENT2  = "#00c8ff"  # Cyan Info
+BG       = "#0a0a0f"  # Deep Abyss
+BG2      = "#0e0e18"  # Dark Navy
+BG3      = "#12121e"  # Panel Dark
+FG       = "#d0d8e0"  # Ghost White
+FG_DIM   = "#505a6a"  # Slate
+ACCENT   = "#00ff9f"  # Matrix Green
+ACCENT2  = "#00d4ff"  # Neon Cyan
 WARNING  = "#ff2255"  # Hot Red
 SUCCESS  = "#00ff41"  # Terminal Green
 RED      = "#ff2255"
-CYAN     = "#00c8ff"
-YELLOW   = "#ffd000"
-PURPLE   = "#bb77ff"
-ORANGE   = "#ff8c00"
-BORDER   = "#151520"
-SIDEBAR_BG = "#08080f"
+CYAN     = "#00d4ff"
+YELLOW   = "#ffcc00"
+PURPLE   = "#c084fc"
+ORANGE   = "#ff9500"
+BORDER   = "#1a1a2e"
+SIDEBAR_BG = "#0c0c14"
 FONT     = "Consolas"
+# Button Styling
+BTN_FG   = "#141422"
+BTN_HOVER = "#1e1e30"
+BTN_ACTIVE = "#00ff9f"
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -1813,6 +1817,7 @@ class TechBotGUI(ctk.CTk):
 
         self.title("TECHBOT A1 // PHANTOM_OPS")
         self.geometry("1600x950")
+        self.minsize(1200, 700)
         self.configure(fg_color=BG)
         self.running = True
         self.agent = HackingAgent(self)
@@ -1821,6 +1826,7 @@ class TechBotGUI(ctk.CTk):
         self.is_printing = False
         self.print_lock = threading.Lock()
         self._start_time = time.time()
+        self._topology_devices = []  # Real network devices for topology
 
         # Command history
         self.cmd_history = []
@@ -1850,12 +1856,12 @@ class TechBotGUI(ctk.CTk):
         self.grid_columnconfigure(1, weight=0)  # Right panel
 
         # ═══════ TOP BAR ═══════
-        self.topbar = ctk.CTkFrame(self, fg_color=BG2, height=36, corner_radius=0)
+        self.topbar = ctk.CTkFrame(self, fg_color=BG2, height=40, corner_radius=0, border_color=BORDER, border_width=1)
         self.topbar.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.topbar.grid_propagate(False)
 
-        ctk.CTkLabel(self.topbar, text="◆ TECHBOT A1", text_color=ACCENT, font=(FONT, 12, "bold")).pack(side="left", padx=15)
-        ctk.CTkLabel(self.topbar, text="│", text_color=BORDER, font=(FONT, 12)).pack(side="left")
+        ctk.CTkLabel(self.topbar, text="◆ TECHBOT A1", text_color=ACCENT, font=(FONT, 13, "bold")).pack(side="left", padx=15)
+        ctk.CTkLabel(self.topbar, text="│", text_color=BORDER, font=(FONT, 14)).pack(side="left")
         ctk.CTkLabel(self.topbar, text=" PHANTOM OPS v10.0", text_color=FG_DIM, font=(FONT, 10)).pack(side="left", padx=5)
 
         self.lbl_clock = ctk.CTkLabel(self.topbar, text="00:00:00", text_color=FG_DIM, font=(FONT, 10))
@@ -1864,18 +1870,20 @@ class TechBotGUI(ctk.CTk):
 
         ctk.CTkLabel(self.topbar, text="│", text_color=BORDER, font=(FONT, 12)).pack(side="right")
 
-        self.btn_stop = ctk.CTkButton(self.topbar, text="⬛ KILL ALL", fg_color="#1a0008", hover_color="#330011",
-                                     text_color=RED, font=(FONT, 9, "bold"), width=90, height=24,
+        self.btn_stop = ctk.CTkButton(self.topbar, text="⬛ KILL ALL", fg_color="#2a0010", hover_color="#440018",
+                                     text_color=RED, font=(FONT, 10, "bold"), width=100, height=24,
                                      command=self.stop_all_jobs)
         self.btn_stop.pack(side="right", padx=8)
 
-        self.lbl_status = ctk.CTkLabel(self.topbar, text="● READY", text_color=ACCENT, font=(FONT, 10, "bold"))
+        self.lbl_status = ctk.CTkLabel(self.topbar, text="● READY", text_color=ACCENT, font=(FONT, 11, "bold"))
         self.lbl_status.pack(side="right", padx=10)
 
         # Audio toggle in top bar
-        self.btn_audio = ctk.CTkButton(self.topbar, text="🎙 OFF", fg_color="#120008",
-                                       hover_color="#1a0011", text_color=RED, font=(FONT, 9, "bold"),
-                                       width=65, height=24, command=self.toggle_voice)
+        self.btn_audio = ctk.CTkButton(self.topbar, text="🎙 OFF", fg_color="#1a0010",
+                                       hover_color="#2a0018", text_color=RED, font=(FONT, 9, "bold"),
+                                       width=75, height=28, corner_radius=6,
+                                       border_width=1, border_color="#330015",
+                                       command=self.toggle_voice)
         self.btn_audio.pack(side="right", padx=4)
 
         # AI model indicator in top bar
@@ -1888,7 +1896,7 @@ class TechBotGUI(ctk.CTk):
         self.center.grid(row=1, column=0, sticky="nsew", padx=(4,2), pady=4)
 
         # Terminal header
-        hdr = ctk.CTkFrame(self.center, fg_color=BG2, height=30, corner_radius=0)
+        hdr = ctk.CTkFrame(self.center, fg_color=BG2, height=32, corner_radius=0, border_color=BORDER, border_width=1)
         hdr.pack(fill="x")
         ctk.CTkLabel(hdr, text=" ◆ TERMINAL", text_color=ACCENT, font=(FONT, 10, "bold")).pack(side="left", padx=10)
         self.lbl_conn_count = ctk.CTkLabel(hdr, text="CONN: 0", text_color=FG_DIM, font=(FONT, 9))
@@ -1896,7 +1904,7 @@ class TechBotGUI(ctk.CTk):
 
         # Console output
         self.console = tk.Text(self.center, bg=BG, fg=FG, insertbackground=ACCENT,
-                               font=(FONT, 12), wrap="word", bd=0, padx=15, pady=12,
+                               font=(FONT, 12), wrap="word", bd=0, padx=18, pady=14,
                                selectbackground="#1a2a1a", selectforeground=ACCENT,
                                state="disabled", undo=False)
         self.console.pack(fill="both", expand=True)
@@ -1916,7 +1924,7 @@ class TechBotGUI(ctk.CTk):
         self.console.tag_config("logo", foreground=ACCENT, font=(FONT, 11))
 
         # Input line
-        self.inp_frame = ctk.CTkFrame(self.center, fg_color=BG2, height=42, corner_radius=0)
+        self.inp_frame = ctk.CTkFrame(self.center, fg_color=BG2, height=44, corner_radius=0, border_color=BORDER, border_width=1)
         self.inp_frame.pack(fill="x")
         self.lbl_prompt = ctk.CTkLabel(self.inp_frame, text="efa➜ ", text_color=ACCENT, font=(FONT, 14, "bold"))
         self.lbl_prompt.pack(side="left", padx=(10,0))
@@ -1941,12 +1949,12 @@ class TechBotGUI(ctk.CTk):
         self.after(100, self._update_ui_glow)
 
         # ═══════ RIGHT PANEL (WAR ROOM MFD) ═══════
-        self.right = ctk.CTkFrame(self, fg_color=BG2, width=320, corner_radius=0, border_color=BORDER, border_width=1)
+        self.right = ctk.CTkFrame(self, fg_color=BG2, width=340, corner_radius=0, border_color=BORDER, border_width=1)
         self.right.grid(row=1, column=1, sticky="nsew", padx=(0,4), pady=4)
         self.right.grid_propagate(False)
         
         # MFD Header
-        ctk.CTkLabel(self.right, text="❖ TACTICAL MFD", text_color=ACCENT, font=(FONT, 10, "bold")).pack(fill="x", pady=(5,0))
+        ctk.CTkLabel(self.right, text="❖ TACTICAL MFD", text_color=ACCENT, font=(FONT, 11, "bold")).pack(fill="x", pady=(8,2))
         
         # Tabs: OPS (Map), INTEL (Sniffer), SYS (Status)
         self.tabs = ctk.CTkTabview(self.right, fg_color="transparent", bg_color="transparent", 
@@ -1977,7 +1985,7 @@ class TechBotGUI(ctk.CTk):
         self._section(self.tab_ops, "── LIVE CONNECTIONS ──")
         self.conn_frame = ctk.CTkFrame(self.tab_ops, fg_color=BG, corner_radius=4)
         self.conn_frame.pack(fill="both", expand=True, padx=4, pady=(0,4))
-        self.live_conn_text = tk.Text(self.conn_frame, bg=BG, fg=FG_DIM, font=(FONT, 7), bd=0,
+        self.live_conn_text = tk.Text(self.conn_frame, bg=BG, fg=FG_DIM, font=(FONT, 8), bd=0,
                                       wrap="none", padx=4, pady=4, state="disabled")
         self.live_conn_text.pack(fill="both", expand=True)
         # Tags for conn text
@@ -1988,7 +1996,7 @@ class TechBotGUI(ctk.CTk):
 
         # --- TAB INTEL: SNIFFER & GEO ---
         self._section(self.tab_intel, "── PACKET SCOPE ──")
-        self.sniff_text = tk.Text(self.tab_intel, bg="#050510", fg="#33ff33", font=("Consolas", 7), height=15, bd=0)
+        self.sniff_text = tk.Text(self.tab_intel, bg="#050510", fg="#33ff33", font=("Consolas", 8), height=15, bd=0)
         self.sniff_text.pack(fill="x", padx=5, pady=5)
         self.sniff_text.insert("1.0", "[*] WAITING FOR TRAFFIC...\n")
         self.sniff_text.tag_config("http", foreground="orange", background="#221100")
@@ -2017,7 +2025,7 @@ class TechBotGUI(ctk.CTk):
 
 
         # ═══════ BOTTOM BAR ═══════
-        self.botbar = ctk.CTkFrame(self, fg_color=BG2, height=26, corner_radius=0)
+        self.botbar = ctk.CTkFrame(self, fg_color=BG2, height=28, corner_radius=0, border_color=BORDER, border_width=1)
         self.botbar.grid(row=2, column=0, columnspan=2, sticky="ew")
         self.botbar.grid_propagate(False)
         self.lbl_bot = ctk.CTkLabel(self.botbar, text="SYS: NOMINAL", text_color=FG_DIM, font=(FONT, 8))
