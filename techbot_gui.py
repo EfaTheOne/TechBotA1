@@ -20,6 +20,7 @@ import string
 import struct
 import json
 import re
+import ast
 import http.client
 import codecs
 import requests
@@ -2080,6 +2081,7 @@ class TechBotGUI(ctk.CTk):
         self.ram_data = deque([0]*100, maxlen=100)
         self._app_window = None  # Current app overlay
         self._geo_cache = {}  # Cache for geo lookups
+        self._app_notes_data = ""  # Persistent notes storage
 
 
         # ═══════ BOTTOM BAR ═══════
@@ -2180,7 +2182,7 @@ class TechBotGUI(ctk.CTk):
                 "techbot app passwords", "techbot app firewall", "techbot app processes",
                 "techbot app hexeditor", "techbot app ipinfo", "techbot app calculator",
                 "techbot app notes", "techbot app exploits", "techbot app dashboard",
-                "techbot app voice"]
+                "techbot app voice", "techbot app close"]
         match = ""
         for c in cmds:
             if c.startswith(val.lower()) and val.lower() != c:
@@ -2660,9 +2662,36 @@ class TechBotGUI(ctk.CTk):
         self.cprint("    • Run 'techbot usage <cmd>' for deep tactical documentation", "dim")
         self.cprint("    • Run 'techbot manual' for guided attack scenarios", "dim")
         self.cprint("    • Many tools require Administrator/root privileges", "dim")
-        self.cprint("    • The right panel shows live network topology, system gauges,", "dim")
-        self.cprint("      packet captures, and geo-targeting data in real time", "dim")
+        self.cprint("    • Use 'techbot app <name>' to launch overlay tools", "dim")
+        self.cprint("      (dashboard, topology, sniffer, monitor, etc.)", "dim")
         self.cprint("    • Code blocks from AI responses are click-to-copy", "dim")
+        self.cprint("", "dim")
+        self.cprint("─" * 80, "dim")
+        self.cprint("  ▸ APP LAUNCHER", "accent")
+        self.cprint("─" * 80, "dim")
+        self.cprint("    app                               List all available apps", "dim")
+        self.cprint("    app dashboard                     System overview (CPU/RAM/NET)", "dim")
+        self.cprint("    app monitor                       Live CPU, RAM, NET graphs", "dim")
+        self.cprint("    app topology                      Network topology map", "dim")
+        self.cprint("    app connections                   Active network connections", "dim")
+        self.cprint("    app nettraffic                    Network throughput graph", "dim")
+        self.cprint("    app sniffer                       Live packet capture", "dim")
+        self.cprint("    app geotarget                     Geo-IP lookup for connections", "dim")
+        self.cprint("    app worldmap                      Map connection origins", "dim")
+        self.cprint("    app entropy                       Spectral waveform visualizer", "dim")
+        self.cprint("    app portscanner                   GUI port scanner", "dim")
+        self.cprint("    app wifiradar                     Scan nearby WiFi networks", "dim")
+        self.cprint("    app hashcracker                   GUI hash cracker", "dim")
+        self.cprint("    app passwords                     Saved WiFi passwords", "dim")
+        self.cprint("    app firewall                      Firewall rules viewer", "dim")
+        self.cprint("    app processes                     Running process list", "dim")
+        self.cprint("    app hexeditor                     Hex file viewer", "dim")
+        self.cprint("    app ipinfo                        IP geolocation lookup", "dim")
+        self.cprint("    app calculator                    Calculator", "dim")
+        self.cprint("    app notes                         Persistent notepad", "dim")
+        self.cprint("    app exploits                      Exploit technique reference", "dim")
+        self.cprint("    app voice                         Voice command control", "dim")
+        self.cprint("    app close                         Close current app window", "dim")
         self.cprint("═"*80 + "\n", "dim")
 
     # ===== AI =====
@@ -3324,34 +3353,6 @@ class TechBotGUI(ctk.CTk):
         return "".join(res)
 
 
-    def _draw_gauges(self):
-        """Draw sci-fi radial gauges for CPU/RAM"""
-        try:
-            c = self.gauge_canvas
-            c.delete("all")
-            w, h = 280, 100
-            
-            # CPU Gauge (Left)
-            cpu_val = self.cpu_data[-1] if self.cpu_data else 0
-            cx, cy, r = 70, 50, 40
-            # Background arc
-            c.create_arc(cx-r, cy-r, cx+r, cy+r, start=150, extent=-240, style="arc", outline="#333", width=8)
-            # Active arc
-            ext = -240 * (cpu_val / 100)
-            col = ACCENT if cpu_val < 80 else RED
-            c.create_arc(cx-r, cy-r, cx+r, cy+r, start=150, extent=ext, style="arc", outline=col, width=8)
-            c.create_text(cx, cy, text=f"CPU\n{int(cpu_val)}%", fill=FG, font=(FONT, 8, "bold"), justify="center")
-            
-            # RAM Gauge (Right)
-            ram_val = self.ram_data[-1] if self.ram_data else 0
-            cx, cy = 210, 50
-            c.create_arc(cx-r, cy-r, cx+r, cy+r, start=150, extent=-240, style="arc", outline="#333", width=8)
-            ext = -240 * (ram_val / 100)
-            col = PURPLE if ram_val < 80 else RED
-            c.create_arc(cx-r, cy-r, cx+r, cy+r, start=150, extent=ext, style="arc", outline=col, width=8)
-            c.create_text(cx, cy, text=f"RAM\n{int(ram_val)}%", fill=FG, font=(FONT, 8, "bold"), justify="center")
-        except: pass
-
     def _init_map_nodes(self):
         """Initialize topology with real network data from system connections and ARP"""
         my_ip = get_local_ip()
@@ -3422,124 +3423,6 @@ class TechBotGUI(ctk.CTk):
         # Store discovered devices for use elsewhere
         self._topology_devices = [n for n in self.nodes if n['type'] != 'root']
 
-    def _update_map(self):
-        """Physics-based Vector Map Animation with real network data"""
-        try:
-            c = self.map_canvas
-            c.delete("all")
-            w = c.winfo_width() or 300
-            h = c.winfo_height() or 200
-
-            if not self.nodes:
-                c.create_text(w // 2, h // 2, text="NO NETWORK DATA", fill=FG_DIM, font=(FONT, 8))
-                return
-
-            # Subtle grid background
-            for gx in range(0, w, 30):
-                c.create_line(gx, 0, gx, h, fill="#0a0a14", width=1)
-            for gy in range(0, h, 30):
-                c.create_line(0, gy, w, gy, fill="#0a0a14", width=1)
-
-            center = self.nodes[0]
-
-            for i, n in enumerate(self.nodes):
-                # Repulsion from other nodes
-                for other in self.nodes:
-                    if n is other:
-                        continue
-                    dx, dy = n['x'] - other['x'], n['y'] - other['y']
-                    dist = math.hypot(dx, dy) or 1
-                    force = 400 / (dist ** 2)
-                    n['vx'] += (dx / dist) * force
-                    n['vy'] += (dy / dist) * force
-
-                # Attraction to center
-                if n is not center:
-                    dx, dy = center['x'] - n['x'], center['y'] - n['y']
-                    dist = math.hypot(dx, dy) or 1
-                    n['vx'] += (dx / dist) * 0.4
-                    n['vy'] += (dy / dist) * 0.4
-
-                # Damping
-                n['vx'] *= 0.85
-                n['vy'] *= 0.85
-                n['x'] += n['vx']
-                n['y'] += n['vy']
-
-                # Bounds
-                n['x'] = max(25, min(w - 25, n['x']))
-                n['y'] = max(20, min(h - 20, n['y']))
-
-                # Draw connections to root
-                if n is not center:
-                    # Animated pulse on random connections
-                    pulse = random.random() > 0.85
-                    line_width = 2 if pulse else 1
-                    if n['type'] == 'gateway':
-                        line_col = ACCENT if pulse else "#003322"
-                    elif n['type'] == 'local':
-                        line_col = CYAN if pulse else "#001833"
-                    else:
-                        line_col = PURPLE if pulse else "#180033"
-                    c.create_line(center['x'], center['y'], n['x'], n['y'],
-                                  fill=line_col, width=line_width, dash=(4, 2) if not pulse else ())
-
-                    # Data flow indicator (small dot moving along connection)
-                    if pulse:
-                        t = (time.time() * 2) % 1
-                        px = center['x'] + (n['x'] - center['x']) * t
-                        py = center['y'] + (n['y'] - center['y']) * t
-                        c.create_oval(px - 2, py - 2, px + 2, py + 2, fill="#ffffff", outline="")
-
-                # Draw node
-                if n['type'] == 'root':
-                    r = 6
-                    col = ACCENT
-                    c.create_oval(n['x'] - r - 3, n['y'] - r - 3, n['x'] + r + 3, n['y'] + r + 3,
-                                  outline=ACCENT, width=1, dash=(2, 2))
-                elif n['type'] == 'gateway':
-                    r = 5
-                    col = YELLOW
-                elif n['type'] == 'local':
-                    r = 3
-                    col = CYAN
-                else:
-                    r = 3
-                    col = PURPLE
-
-                c.create_oval(n['x'] - r, n['y'] - r, n['x'] + r, n['y'] + r, fill=col, outline=col)
-                c.create_text(n['x'], n['y'] - r - 7, text=n['label'], fill=FG_DIM,
-                              font=(FONT, 6), justify="center")
-
-            # Legend
-            c.create_text(8, h - 8, text=f"NODES: {len(self.nodes)}", fill=FG_DIM,
-                          font=(FONT, 6), anchor="w")
-
-        except Exception:
-            pass
-
-    def _draw_entropy(self):
-        """Spectral Waveform Visualization"""
-        try:
-            c = self.entropy_canvas
-            c.delete("all")
-            w, h = 280, 60
-            points = []
-            steps = 40
-            for i in range(steps):
-                x = (w / steps) * i
-                # Perlin-like noise
-                noise = math.sin(time.time()*5 + i*0.5) * random.random() * 20
-                y = h/2 + noise
-                points.extend([x, y])
-            
-            c.create_line(points, fill=PURPLE, width=1, smooth=True)
-            # Second layer
-            points2 = []
-            for i in range(0, len(points), 2):
-                points2.extend([points[i], points[i+1] + 5])
-            c.create_line(points2, fill="#440044", width=1, smooth=True)
-        except: pass
     def sys_loop(self):
         if not hasattr(self, 'nodes') or not self.nodes:
             self._init_map_nodes()
@@ -4307,6 +4190,1005 @@ class TechBotGUI(ctk.CTk):
             args=(target, lambda x: self.cprint(x, "dim"), STOP_EVENT),
             daemon=True
         ).start()
+
+    # ===== APP LAUNCHER =====
+
+    def tool_app(self, args=None):
+        """App launcher — 'techbot app <name>' opens an overlay window"""
+        apps = {
+            "worldmap": self._app_worldmap,
+            "monitor": self._app_monitor,
+            "nettraffic": self._app_nettraffic,
+            "connections": self._app_connections,
+            "sniffer": self._app_sniffer,
+            "geotarget": self._app_geotarget,
+            "entropy": self._app_entropy,
+            "topology": self._app_topology,
+            "portscanner": self._app_portscanner,
+            "wifiradar": self._app_wifiradar,
+            "hashcracker": self._app_hashcracker,
+            "passwords": self._app_passwords,
+            "firewall": self._app_firewall,
+            "processes": self._app_processes,
+            "hexeditor": self._app_hexeditor,
+            "ipinfo": self._app_ipinfo,
+            "calculator": self._app_calculator,
+            "notes": self._app_notes,
+            "exploits": self._app_exploits,
+            "dashboard": self._app_dashboard,
+            "voice": self._app_voice,
+        }
+
+        if not args:
+            self.cprint("\n  ╔════════════════════════════════════════════════════════════╗", "cyan")
+            self.cprint("  ║              ██  APP LAUNCHER  ██                          ║", "cyan")
+            self.cprint("  ╚════════════════════════════════════════════════════════════╝", "cyan")
+            self.cprint("  Usage: techbot app <name>\n", "yellow")
+            cols = list(apps.keys())
+            for i in range(0, len(cols), 3):
+                row = "    ".join(f"{c:<16}" for c in cols[i:i+3])
+                self.cprint(f"    {row}", "dim")
+            self.cprint("", "dim")
+            return
+
+        name = args[0].lower()
+        if name == "close":
+            self._close_app()
+            return
+
+        if name not in apps:
+            self.cprint(f"  [!] Unknown app: {name}", "red")
+            self.cprint(f"  [*] Available: {', '.join(apps.keys())}", "dim")
+            return
+
+        # Close existing app before opening a new one
+        self._close_app()
+        self.cprint(f"  [*] Launching app: {name}", "accent")
+        apps[name]()
+
+    def _close_app(self):
+        """Close the current app overlay window"""
+        if self._app_window:
+            try:
+                self._app_window.destroy()
+            except:
+                pass
+            self._app_window = None
+            self.cprint("  [*] App closed.", "dim")
+
+    def _make_app_window(self, title, width=800, height=600):
+        """Create a standard Toplevel app window with theme"""
+        # Close any existing app window first to prevent resource leaks
+        self._close_app()
+
+        win = tk.Toplevel(self)
+        win.title(f"TECHBOT // {title}")
+        win.geometry(f"{width}x{height}")
+        win.configure(bg=BG)
+        win.protocol("WM_DELETE_WINDOW", self._close_app)
+        self._app_window = win
+
+        # Title bar
+        hdr = tk.Frame(win, bg=BG2, height=32)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text=f" ◆ {title}", fg=ACCENT, bg=BG2, font=(FONT, 10, "bold")).pack(side="left", padx=10)
+        tk.Button(hdr, text="✕ CLOSE", fg=RED, bg=BG2, font=(FONT, 8, "bold"),
+                  bd=0, activebackground=BG2, activeforeground=RED,
+                  command=self._close_app).pack(side="right", padx=10)
+        return win
+
+    # ---- DASHBOARD ----
+    def _app_dashboard(self):
+        win = self._make_app_window("DASHBOARD", 900, 650)
+        canvas = tk.Canvas(win, bg=BG, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        def _app_update():
+            try:
+                canvas.delete("all")
+                w, h = canvas.winfo_width(), canvas.winfo_height()
+                if w < 10: return
+
+                # CPU/RAM gauges
+                cpu = self.cpu_data[-1] if self.cpu_data else 0
+                ram = self.ram_data[-1] if self.ram_data else 0
+
+                # CPU Arc
+                cx, cy, r = w//4, 120, 60
+                canvas.create_arc(cx-r, cy-r, cx+r, cy+r, start=150, extent=-240, style="arc", outline="#333", width=10)
+                ext = -240 * (cpu / 100)
+                col = ACCENT if cpu < 80 else RED
+                canvas.create_arc(cx-r, cy-r, cx+r, cy+r, start=150, extent=ext, style="arc", outline=col, width=10)
+                canvas.create_text(cx, cy, text=f"CPU\n{int(cpu)}%", fill=FG, font=(FONT, 12, "bold"), justify="center")
+
+                # RAM Arc
+                cx2 = 3*w//4
+                canvas.create_arc(cx2-r, cy-r, cx2+r, cy+r, start=150, extent=-240, style="arc", outline="#333", width=10)
+                ext = -240 * (ram / 100)
+                col = PURPLE if ram < 80 else RED
+                canvas.create_arc(cx2-r, cy-r, cx2+r, cy+r, start=150, extent=ext, style="arc", outline=col, width=10)
+                canvas.create_text(cx2, cy, text=f"RAM\n{int(ram)}%", fill=FG, font=(FONT, 12, "bold"), justify="center")
+
+                # Net I/O graph
+                gy = 220
+                canvas.create_text(20, gy, text="NET I/O (KB/s)", fill=FG_DIM, font=(FONT, 8), anchor="nw")
+                gy += 15
+                gh = 80
+                if len(self.net_data) > 1:
+                    maxv = max(self.net_data) or 1
+                    step = (w - 40) / (len(self.net_data) - 1)
+                    pts = []
+                    for i, v in enumerate(self.net_data):
+                        pts.extend([20 + i * step, gy + gh - (v / maxv * gh)])
+                    if len(pts) >= 4:
+                        canvas.create_line(pts, fill=CYAN, width=2, smooth=True)
+
+                # CPU history graph
+                cgy = gy + gh + 30
+                canvas.create_text(20, cgy, text="CPU HISTORY", fill=FG_DIM, font=(FONT, 8), anchor="nw")
+                cgy += 15
+                if len(self.cpu_data) > 1:
+                    step = (w - 40) / (len(self.cpu_data) - 1)
+                    pts = []
+                    for i, v in enumerate(self.cpu_data):
+                        pts.extend([20 + i * step, cgy + 60 - (v / 100 * 60)])
+                    if len(pts) >= 4:
+                        canvas.create_line(pts, fill=ACCENT, width=2, smooth=True)
+
+                # Connection count
+                n_est = len(self.est_conns) if hasattr(self, 'est_conns') else 0
+                canvas.create_text(w//2, h - 40, text=f"ESTABLISHED CONNECTIONS: {n_est}", fill=FG_DIM, font=(FONT, 10))
+                elapsed = int(time.time() - self._start_time)
+                hrs, mins, secs = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
+                canvas.create_text(w//2, h - 20, text=f"UPTIME: {hrs:02d}:{mins:02d}:{secs:02d}", fill=FG_DIM, font=(FONT, 9))
+            except:
+                pass
+
+        win._app_update = _app_update
+        _app_update()
+
+    # ---- MONITOR ----
+    def _app_monitor(self):
+        win = self._make_app_window("SYSTEM MONITOR", 800, 500)
+        canvas = tk.Canvas(win, bg=BG, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        def _app_update():
+            try:
+                canvas.delete("all")
+                w = canvas.winfo_width()
+                if w < 10: return
+
+                cpu = self.cpu_data[-1] if self.cpu_data else 0
+                ram = self.ram_data[-1] if self.ram_data else 0
+
+                # CPU graph
+                canvas.create_text(20, 10, text=f"CPU: {cpu:.1f}%", fill=ACCENT, font=(FONT, 11, "bold"), anchor="nw")
+                if len(self.cpu_data) > 1:
+                    step = (w - 40) / (len(self.cpu_data) - 1)
+                    pts = []
+                    for i, v in enumerate(self.cpu_data):
+                        pts.extend([20 + i * step, 130 - (v / 100 * 100)])
+                    if len(pts) >= 4:
+                        canvas.create_line(pts, fill=ACCENT, width=2, smooth=True)
+
+                # RAM graph
+                canvas.create_text(20, 150, text=f"RAM: {ram:.1f}%", fill=PURPLE, font=(FONT, 11, "bold"), anchor="nw")
+                if len(self.ram_data) > 1:
+                    step = (w - 40) / (len(self.ram_data) - 1)
+                    pts = []
+                    for i, v in enumerate(self.ram_data):
+                        pts.extend([20 + i * step, 270 - (v / 100 * 100)])
+                    if len(pts) >= 4:
+                        canvas.create_line(pts, fill=PURPLE, width=2, smooth=True)
+
+                # Net graph
+                kb = self._last_kb_s if hasattr(self, '_last_kb_s') else 0
+                canvas.create_text(20, 290, text=f"NET: {kb:.1f} KB/s", fill=CYAN, font=(FONT, 11, "bold"), anchor="nw")
+                if len(self.net_data) > 1:
+                    maxv = max(self.net_data) or 1
+                    step = (w - 40) / (len(self.net_data) - 1)
+                    pts = []
+                    for i, v in enumerate(self.net_data):
+                        pts.extend([20 + i * step, 410 - (v / maxv * 100)])
+                    if len(pts) >= 4:
+                        canvas.create_line(pts, fill=CYAN, width=2, smooth=True)
+            except:
+                pass
+
+        win._app_update = _app_update
+        _app_update()
+
+    # ---- TOPOLOGY ----
+    def _app_topology(self):
+        win = self._make_app_window("NETWORK TOPOLOGY", 900, 600)
+        canvas = tk.Canvas(win, bg=BG, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        if not self.nodes:
+            self._init_map_nodes()
+
+        def _app_update():
+            self._update_map_on_canvas(canvas)
+
+        win._app_update = _app_update
+        _app_update()
+
+    def _update_map_on_canvas(self, c):
+        """Physics-based topology drawn on any canvas"""
+        try:
+            c.delete("all")
+            w = c.winfo_width() or 600
+            h = c.winfo_height() or 400
+            if not self.nodes:
+                c.create_text(w // 2, h // 2, text="NO NETWORK DATA", fill=FG_DIM, font=(FONT, 12))
+                return
+
+            for gx in range(0, w, 40):
+                c.create_line(gx, 0, gx, h, fill="#0a0a14", width=1)
+            for gy in range(0, h, 40):
+                c.create_line(0, gy, w, gy, fill="#0a0a14", width=1)
+
+            center = self.nodes[0]
+            # Scale node positions to canvas size
+            sx, sy = w / 300, h / 200
+
+            for n in self.nodes:
+                for other in self.nodes:
+                    if n is other: continue
+                    dx, dy = n['x'] - other['x'], n['y'] - other['y']
+                    dist = math.hypot(dx, dy) or 1
+                    force = 400 / (dist ** 2)
+                    n['vx'] += (dx / dist) * force
+                    n['vy'] += (dy / dist) * force
+                if n is not center:
+                    dx, dy = center['x'] - n['x'], center['y'] - n['y']
+                    dist = math.hypot(dx, dy) or 1
+                    n['vx'] += (dx / dist) * 0.4
+                    n['vy'] += (dy / dist) * 0.4
+                n['vx'] *= 0.85
+                n['vy'] *= 0.85
+                n['x'] += n['vx']
+                n['y'] += n['vy']
+                n['x'] = max(25, min(280, n['x']))
+                n['y'] = max(20, min(180, n['y']))
+
+                px, py = n['x'] * sx, n['y'] * sy
+                if n is not center:
+                    cpx, cpy = center['x'] * sx, center['y'] * sy
+                    pulse = random.random() > 0.85
+                    lw = 2 if pulse else 1
+                    if n['type'] == 'gateway': lc = ACCENT if pulse else "#003322"
+                    elif n['type'] == 'local': lc = CYAN if pulse else "#001833"
+                    else: lc = PURPLE if pulse else "#180033"
+                    c.create_line(cpx, cpy, px, py, fill=lc, width=lw)
+                    if pulse:
+                        t = (time.time() * 2) % 1
+                        dpx = cpx + (px - cpx) * t
+                        dpy = cpy + (py - cpy) * t
+                        c.create_oval(dpx-2, dpy-2, dpx+2, dpy+2, fill="#fff", outline="")
+
+                if n['type'] == 'root': r, col = 8, ACCENT
+                elif n['type'] == 'gateway': r, col = 6, YELLOW
+                elif n['type'] == 'local': r, col = 4, CYAN
+                else: r, col = 4, PURPLE
+                c.create_oval(px-r, py-r, px+r, py+r, fill=col, outline=col)
+                c.create_text(px, py - r - 10, text=n['label'], fill=FG_DIM, font=(FONT, 8), justify="center")
+
+            c.create_text(10, h - 15, text=f"NODES: {len(self.nodes)}", fill=FG_DIM, font=(FONT, 8), anchor="w")
+        except:
+            pass
+
+    # ---- NET TRAFFIC ----
+    def _app_nettraffic(self):
+        win = self._make_app_window("NET TRAFFIC", 800, 400)
+        canvas = tk.Canvas(win, bg=BG, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        def _app_update():
+            try:
+                canvas.delete("all")
+                w, h = canvas.winfo_width(), canvas.winfo_height()
+                if w < 10: return
+                kb = self._last_kb_s if hasattr(self, '_last_kb_s') else 0
+                canvas.create_text(20, 10, text=f"NETWORK THROUGHPUT: {kb:.1f} KB/s", fill=CYAN, font=(FONT, 11, "bold"), anchor="nw")
+                if len(self.net_data) > 1:
+                    maxv = max(self.net_data) or 1
+                    step = (w - 40) / (len(self.net_data) - 1)
+                    pts = []
+                    for i, v in enumerate(self.net_data):
+                        pts.extend([20 + i * step, h - 30 - (v / maxv * (h - 70))])
+                    if len(pts) >= 4:
+                        canvas.create_line(pts, fill=CYAN, width=2, smooth=True)
+                net = psutil.net_io_counters()
+                canvas.create_text(20, h - 15, text=f"TOTAL SENT: {net.bytes_sent/1048576:.1f} MB  |  RECV: {net.bytes_recv/1048576:.1f} MB", fill=FG_DIM, font=(FONT, 8), anchor="w")
+            except:
+                pass
+
+        win._app_update = _app_update
+        _app_update()
+
+    # ---- CONNECTIONS ----
+    def _app_connections(self):
+        win = self._make_app_window("ACTIVE CONNECTIONS", 900, 500)
+        txt = tk.Text(win, bg=BG, fg=FG, font=(FONT, 10), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("hdr", foreground=CYAN, font=(FONT, 10, "bold"))
+        txt.tag_config("est", foreground=ACCENT)
+        txt.tag_config("listen", foreground=YELLOW)
+        txt.tag_config("other", foreground=FG_DIM)
+
+        def _app_update():
+            try:
+                txt.config(state="normal")
+                txt.delete("1.0", "end")
+                txt.insert("end", f"{'PROTO':<8}{'LOCAL ADDRESS':<28}{'REMOTE ADDRESS':<28}{'STATUS':<16}{'PID':<8}\n", "hdr")
+                txt.insert("end", "─" * 88 + "\n", "hdr")
+                conns = psutil.net_connections(kind='inet')
+                for c in sorted(conns, key=lambda x: x.status):
+                    proto = "TCP" if c.type == socket.SOCK_STREAM else "UDP"
+                    local = f"{c.laddr.ip}:{c.laddr.port}" if c.laddr else "-"
+                    remote = f"{c.raddr.ip}:{c.raddr.port}" if c.raddr else "-"
+                    tag = "est" if c.status == 'ESTABLISHED' else ("listen" if c.status == 'LISTEN' else "other")
+                    txt.insert("end", f"{proto:<8}{local:<28}{remote:<28}{c.status:<16}{c.pid or '-':<8}\n", tag)
+                txt.config(state="disabled")
+            except:
+                pass
+
+        win._app_update = _app_update
+        _app_update()
+
+    # ---- SNIFFER ----
+    def _app_sniffer(self):
+        win = self._make_app_window("PACKET SNIFFER", 900, 500)
+        txt = tk.Text(win, bg=BG, fg=FG, font=(FONT, 9), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("dns", foreground=CYAN)
+        txt.tag_config("http", foreground=ACCENT)
+        txt.tag_config("tcp", foreground=FG_DIM)
+        txt.tag_config("hdr", foreground=YELLOW, font=(FONT, 9, "bold"))
+
+        stop = threading.Event()
+        pkt_count = [0]
+
+        def _on_close():
+            stop.set()
+            self._close_app()
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+        def _pkt_cb(summary):
+            pkt_count[0] += 1
+            def _do():
+                try:
+                    txt.config(state="normal")
+                    tag = "tcp"
+                    sl = summary.lower()
+                    if "dns" in sl: tag = "dns"
+                    elif "http" in sl or "get " in sl or "post " in sl: tag = "http"
+                    txt.insert("end", f"[{pkt_count[0]:>5}] {summary}\n", tag)
+                    txt.see("end")
+                    txt.config(state="disabled")
+                except:
+                    pass
+            self.after(0, _do)
+
+        txt.config(state="normal")
+        txt.insert("end", "LIVE PACKET CAPTURE — press ✕ to stop\n", "hdr")
+        txt.insert("end", "─" * 80 + "\n\n", "hdr")
+        txt.config(state="disabled")
+
+        if SCAPY_AVAILABLE:
+            threading.Thread(target=scapy_sniff_packets, args=(_pkt_cb, stop), daemon=True).start()
+        else:
+            txt.config(state="normal")
+            txt.insert("end", "[!] Scapy not available — sniffer requires scapy\n", "hdr")
+            txt.config(state="disabled")
+
+    # ---- GEOTARGET ----
+    def _app_geotarget(self):
+        win = self._make_app_window("GEO-TARGETING", 800, 500)
+        txt = tk.Text(win, bg=BG, fg=FG, font=(FONT, 10), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("hdr", foreground=CYAN, font=(FONT, 10, "bold"))
+        txt.tag_config("info", foreground=ACCENT)
+        txt.tag_config("dim", foreground=FG_DIM)
+
+        def _app_update():
+            try:
+                txt.config(state="normal")
+                txt.delete("1.0", "end")
+                txt.insert("end", "GEO-IP LOOKUP FOR ESTABLISHED CONNECTIONS\n", "hdr")
+                txt.insert("end", "─" * 70 + "\n\n", "hdr")
+                conns = self.est_conns if hasattr(self, 'est_conns') else []
+                seen = set()
+                for c in conns:
+                    if not c.raddr: continue
+                    ip = c.raddr.ip
+                    if ip in seen or ip.startswith('127.') or ip.startswith('192.168.') or ip.startswith('10.'): continue
+                    seen.add(ip)
+                    if ip not in self._geo_cache:
+                        try:
+                            r = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
+                            self._geo_cache[ip] = r.json() if r.status_code == 200 else {}
+                        except:
+                            self._geo_cache[ip] = {}
+                    geo = self._geo_cache.get(ip, {})
+                    country = geo.get('country', '?')
+                    city = geo.get('city', '?')
+                    isp = geo.get('isp', '?')
+                    txt.insert("end", f"  {ip:<20} {country:<15} {city:<20} {isp}\n", "info")
+                if not seen:
+                    txt.insert("end", "  No external connections to geolocate.\n", "dim")
+                txt.config(state="disabled")
+            except:
+                pass
+
+        win._app_update = _app_update
+        _app_update()
+
+    # ---- ENTROPY ----
+    def _app_entropy(self):
+        win = self._make_app_window("ENTROPY VISUALIZER", 800, 300)
+        canvas = tk.Canvas(win, bg=BG, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        def _app_update():
+            try:
+                canvas.delete("all")
+                w, h = canvas.winfo_width(), canvas.winfo_height()
+                if w < 10: return
+                steps = 80
+                pts = []
+                for i in range(steps):
+                    x = (w / steps) * i
+                    noise = math.sin(time.time() * 5 + i * 0.5) * random.random() * (h * 0.3)
+                    y = h / 2 + noise
+                    pts.extend([x, y])
+                if len(pts) >= 4:
+                    canvas.create_line(pts, fill=PURPLE, width=2, smooth=True)
+                    pts2 = []
+                    for i in range(0, len(pts), 2):
+                        pts2.extend([pts[i], pts[i + 1] + 8])
+                    canvas.create_line(pts2, fill="#440044", width=1, smooth=True)
+                canvas.create_text(10, h - 15, text="SPECTRAL WAVEFORM", fill=FG_DIM, font=(FONT, 8), anchor="w")
+            except:
+                pass
+
+        win._app_update = _app_update
+        _app_update()
+
+    # ---- WORLD MAP ----
+    def _app_worldmap(self):
+        win = self._make_app_window("WORLD MAP — Connection Origins", 900, 500)
+        canvas = tk.Canvas(win, bg=BG, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        def _app_update():
+            try:
+                canvas.delete("all")
+                w, h = canvas.winfo_width(), canvas.winfo_height()
+                if w < 10: return
+
+                # Simple world map grid
+                for gx in range(0, w, 40):
+                    canvas.create_line(gx, 0, gx, h, fill="#0a0a14")
+                for gy in range(0, h, 40):
+                    canvas.create_line(0, gy, w, gy, fill="#0a0a14")
+
+                canvas.create_text(w // 2, 15, text="CONNECTION ORIGIN MAP", fill=CYAN, font=(FONT, 10, "bold"))
+
+                # Plot geolocated IPs
+                conns = self.est_conns if hasattr(self, 'est_conns') else []
+                seen = set()
+                plotted = 0
+                for c in conns:
+                    if not c.raddr: continue
+                    ip = c.raddr.ip
+                    if ip in seen or ip.startswith('127.') or ip.startswith('192.168.') or ip.startswith('10.'): continue
+                    seen.add(ip)
+                    geo = self._geo_cache.get(ip, {})
+                    lat = geo.get('lat')
+                    lon = geo.get('lon')
+                    if lat is not None and lon is not None:
+                        # Mercator-like projection
+                        px = int((lon + 180) / 360 * w)
+                        py = int((90 - lat) / 180 * h)
+                        canvas.create_oval(px - 4, py - 4, px + 4, py + 4, fill=ACCENT, outline=CYAN)
+                        canvas.create_text(px, py - 10, text=ip, fill=FG_DIM, font=(FONT, 7))
+                        plotted += 1
+
+                # Mark center (self)
+                cx, cy = w // 2, h // 2
+                canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill=RED, outline=YELLOW)
+                canvas.create_text(cx, cy - 12, text="YOU", fill=YELLOW, font=(FONT, 8, "bold"))
+
+                canvas.create_text(10, h - 15, text=f"PLOTTED: {plotted} IPs", fill=FG_DIM, font=(FONT, 8), anchor="w")
+            except:
+                pass
+
+        win._app_update = _app_update
+        _app_update()
+
+    # ---- PORT SCANNER ----
+    def _app_portscanner(self):
+        win = self._make_app_window("PORT SCANNER", 700, 500)
+        frame = tk.Frame(win, bg=BG)
+        frame.pack(fill="both", expand=True)
+
+        inp_f = tk.Frame(frame, bg=BG2)
+        inp_f.pack(fill="x", padx=10, pady=5)
+        tk.Label(inp_f, text="Target IP:", fg=FG, bg=BG2, font=(FONT, 10)).pack(side="left", padx=5)
+        ip_var = tk.StringVar(value="127.0.0.1")
+        tk.Entry(inp_f, textvariable=ip_var, bg=BG, fg=FG, font=(FONT, 10), insertbackground=ACCENT, bd=0, width=20).pack(side="left", padx=5)
+        tk.Label(inp_f, text="Range:", fg=FG, bg=BG2, font=(FONT, 10)).pack(side="left", padx=5)
+        range_var = tk.StringVar(value="1-1024")
+        tk.Entry(inp_f, textvariable=range_var, bg=BG, fg=FG, font=(FONT, 10), insertbackground=ACCENT, bd=0, width=12).pack(side="left", padx=5)
+
+        txt = tk.Text(frame, bg=BG, fg=FG, font=(FONT, 10), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("open", foreground=ACCENT)
+        txt.tag_config("info", foreground=FG_DIM)
+
+        def _scan():
+            target = ip_var.get().strip()
+            pr = range_var.get().strip()
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            txt.insert("end", f"Scanning {target} ports {pr}...\n\n", "info")
+            txt.config(state="disabled")
+
+            def _cb(line):
+                def _do():
+                    txt.config(state="normal")
+                    tag = "open" if "OPEN" in line.upper() else "info"
+                    txt.insert("end", line + "\n", tag)
+                    txt.see("end")
+                    txt.config(state="disabled")
+                self.after(0, _do)
+
+            def _done(results):
+                def _do():
+                    txt.config(state="normal")
+                    txt.insert("end", f"\nScan complete. {len(results)} open ports.\n", "open")
+                    txt.config(state="disabled")
+                self.after(0, _do)
+
+            threading.Thread(target=port_scan, args=(target, pr, _cb, _done), daemon=True).start()
+
+        tk.Button(inp_f, text="▶ SCAN", fg=BTN_FG, bg=ACCENT, font=(FONT, 10, "bold"), bd=0,
+                  activebackground=ACCENT, command=_scan).pack(side="left", padx=10)
+
+    # ---- WIFI RADAR ----
+    def _app_wifiradar(self):
+        win = self._make_app_window("WIFI RADAR", 800, 500)
+        txt = tk.Text(win, bg=BG, fg=FG, font=(FONT, 10), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("hdr", foreground=CYAN, font=(FONT, 10, "bold"))
+        txt.tag_config("net", foreground=ACCENT)
+        txt.tag_config("dim", foreground=FG_DIM)
+
+        def _refresh():
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            txt.insert("end", "SCANNING WIFI NETWORKS...\n\n", "hdr")
+            txt.config(state="disabled")
+
+            def _t():
+                networks = scan_nearby_wifi_pywifi()
+                def _show():
+                    txt.config(state="normal")
+                    txt.delete("1.0", "end")
+                    txt.insert("end", f"{'SSID':<30}{'BSSID':<20}{'SIGNAL':<10}{'AUTH':<15}\n", "hdr")
+                    txt.insert("end", "─" * 75 + "\n", "hdr")
+                    if networks:
+                        for n in networks:
+                            txt.insert("end", f"{n.get('ssid','?'):<30}{n.get('bssid','?'):<20}{n.get('signal','?'):<10}{n.get('auth','?'):<15}\n", "net")
+                    else:
+                        txt.insert("end", "No networks found or WiFi adapter unavailable.\n", "dim")
+                    txt.config(state="disabled")
+                self.after(0, _show)
+            threading.Thread(target=_t, daemon=True).start()
+
+        btn_f = tk.Frame(win, bg=BG2)
+        btn_f.pack(fill="x")
+        tk.Button(btn_f, text="▶ REFRESH", fg=BTN_FG, bg=ACCENT, font=(FONT, 10, "bold"), bd=0,
+                  activebackground=ACCENT, command=_refresh).pack(side="left", padx=10, pady=5)
+        _refresh()
+
+    # ---- HASH CRACKER ----
+    def _app_hashcracker(self):
+        win = self._make_app_window("HASH CRACKER", 700, 500)
+        frame = tk.Frame(win, bg=BG)
+        frame.pack(fill="both", expand=True)
+
+        inp_f = tk.Frame(frame, bg=BG2)
+        inp_f.pack(fill="x", padx=10, pady=5)
+        tk.Label(inp_f, text="Hash:", fg=FG, bg=BG2, font=(FONT, 10)).pack(side="left", padx=5)
+        hash_var = tk.StringVar()
+        tk.Entry(inp_f, textvariable=hash_var, bg=BG, fg=FG, font=(FONT, 10), insertbackground=ACCENT, bd=0, width=50).pack(side="left", padx=5)
+
+        txt = tk.Text(frame, bg=BG, fg=FG, font=(FONT, 10), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("ok", foreground=ACCENT)
+        txt.tag_config("info", foreground=FG_DIM)
+
+        def _crack():
+            h = hash_var.get().strip()
+            if not h: return
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            txt.insert("end", f"Cracking: {h}\n", "info")
+            txt.config(state="disabled")
+            htype = hashcat_detect_type(h)
+
+            def _cb(line):
+                def _do():
+                    txt.config(state="normal")
+                    txt.insert("end", line + "\n", "info")
+                    txt.see("end")
+                    txt.config(state="disabled")
+                self.after(0, _do)
+
+            def _done(result):
+                def _do():
+                    txt.config(state="normal")
+                    if result:
+                        txt.insert("end", f"\n[+] CRACKED: {result}\n", "ok")
+                    else:
+                        txt.insert("end", "\n[-] Not found in wordlist.\n", "info")
+                    txt.config(state="disabled")
+                self.after(0, _do)
+
+            STOP_EVENT.clear()
+            threading.Thread(target=hashcat_crack, args=(h, htype, _cb, _done, STOP_EVENT), daemon=True).start()
+
+        tk.Button(inp_f, text="▶ CRACK", fg=BTN_FG, bg=ACCENT, font=(FONT, 10, "bold"), bd=0,
+                  activebackground=ACCENT, command=_crack).pack(side="left", padx=10)
+
+    # ---- PASSWORDS ----
+    def _app_passwords(self):
+        win = self._make_app_window("SAVED PASSWORDS", 700, 500)
+        txt = tk.Text(win, bg=BG, fg=FG, font=(FONT, 10), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("hdr", foreground=CYAN, font=(FONT, 10, "bold"))
+        txt.tag_config("pw", foreground=ACCENT)
+        txt.tag_config("dim", foreground=FG_DIM)
+
+        def _t():
+            passwords = get_local_wifi_passwords()
+            def _show():
+                txt.config(state="normal")
+                txt.insert("end", "SAVED WIFI PASSWORDS (this machine)\n", "hdr")
+                txt.insert("end", "─" * 60 + "\n\n", "hdr")
+                if passwords:
+                    for ssid, pw in passwords:
+                        txt.insert("end", f"  {ssid:<30} {pw}\n", "pw")
+                else:
+                    txt.insert("end", "  No saved passwords found (requires Windows + admin).\n", "dim")
+                txt.config(state="disabled")
+            self.after(0, _show)
+        threading.Thread(target=_t, daemon=True).start()
+
+    # ---- FIREWALL ----
+    def _app_firewall(self):
+        win = self._make_app_window("FIREWALL RULES", 800, 500)
+        txt = tk.Text(win, bg=BG, fg=FG, font=(FONT, 10), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("hdr", foreground=CYAN, font=(FONT, 10, "bold"))
+        txt.tag_config("rule", foreground=ACCENT)
+        txt.tag_config("dim", foreground=FG_DIM)
+
+        def _t():
+            try:
+                if os.name == 'nt':
+                    out = subprocess.check_output('netsh advfirewall firewall show rule name=all', shell=True, text=True, timeout=10)
+                else:
+                    out = subprocess.check_output('iptables -L -n 2>/dev/null || echo "iptables not available"', shell=True, text=True, timeout=5)
+            except Exception as e:
+                out = f"Error: {e}"
+            def _show():
+                txt.config(state="normal")
+                txt.insert("end", "FIREWALL RULES\n", "hdr")
+                txt.insert("end", "─" * 70 + "\n\n", "hdr")
+                # Show first 200 lines to avoid overwhelming
+                lines = out.split('\n')[:200]
+                for line in lines:
+                    txt.insert("end", line + "\n", "rule" if "Enabled" in line or "ACCEPT" in line else "dim")
+                if len(out.split('\n')) > 200:
+                    txt.insert("end", f"\n... ({len(out.split('\n'))} total lines, showing first 200)\n", "dim")
+                txt.config(state="disabled")
+            self.after(0, _show)
+        threading.Thread(target=_t, daemon=True).start()
+
+    # ---- PROCESSES ----
+    def _app_processes(self):
+        win = self._make_app_window("RUNNING PROCESSES", 900, 600)
+        txt = tk.Text(win, bg=BG, fg=FG, font=(FONT, 9), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("hdr", foreground=CYAN, font=(FONT, 9, "bold"))
+        txt.tag_config("high", foreground=RED)
+        txt.tag_config("norm", foreground=FG_DIM)
+
+        def _app_update():
+            try:
+                txt.config(state="normal")
+                txt.delete("1.0", "end")
+                txt.insert("end", f"{'PID':<8}{'NAME':<30}{'CPU%':<8}{'MEM%':<8}{'STATUS':<12}\n", "hdr")
+                txt.insert("end", "─" * 66 + "\n", "hdr")
+                procs = []
+                for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'status']):
+                    try:
+                        info = p.info
+                        procs.append(info)
+                    except:
+                        pass
+                procs.sort(key=lambda x: x.get('cpu_percent', 0) or 0, reverse=True)
+                for info in procs[:80]:
+                    pid = info.get('pid', '?')
+                    name = (info.get('name', '?') or '?')[:28]
+                    cpu = info.get('cpu_percent', 0) or 0
+                    mem = info.get('memory_percent', 0) or 0
+                    status = info.get('status', '?')
+                    tag = "high" if cpu > 50 else "norm"
+                    txt.insert("end", f"{pid:<8}{name:<30}{cpu:<8.1f}{mem:<8.1f}{status:<12}\n", tag)
+                txt.config(state="disabled")
+            except:
+                pass
+
+        win._app_update = _app_update
+        _app_update()
+
+    # ---- HEX EDITOR ----
+    def _app_hexeditor(self):
+        win = self._make_app_window("HEX EDITOR", 800, 500)
+        frame = tk.Frame(win, bg=BG)
+        frame.pack(fill="both", expand=True)
+
+        inp_f = tk.Frame(frame, bg=BG2)
+        inp_f.pack(fill="x", padx=10, pady=5)
+        tk.Label(inp_f, text="File:", fg=FG, bg=BG2, font=(FONT, 10)).pack(side="left", padx=5)
+        file_var = tk.StringVar()
+        tk.Entry(inp_f, textvariable=file_var, bg=BG, fg=FG, font=(FONT, 10), insertbackground=ACCENT, bd=0, width=50).pack(side="left", padx=5)
+
+        txt = tk.Text(frame, bg=BG, fg=FG, font=(FONT, 9), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("offset", foreground=CYAN)
+        txt.tag_config("hex", foreground=ACCENT)
+        txt.tag_config("ascii", foreground=FG_DIM)
+
+        def _load():
+            path = file_var.get().strip()
+            if not path or not os.path.isfile(path):
+                txt.config(state="normal")
+                txt.delete("1.0", "end")
+                txt.insert("end", "File not found.\n", "ascii")
+                txt.config(state="disabled")
+                return
+            try:
+                with open(path, "rb") as f:
+                    data = f.read(4096)  # Read first 4KB
+                txt.config(state="normal")
+                txt.delete("1.0", "end")
+                for i in range(0, len(data), 16):
+                    chunk = data[i:i + 16]
+                    hex_str = " ".join(f"{b:02x}" for b in chunk)
+                    asc_str = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+                    txt.insert("end", f"{i:08x}  ", "offset")
+                    txt.insert("end", f"{hex_str:<48}  ", "hex")
+                    txt.insert("end", f"{asc_str}\n", "ascii")
+                txt.config(state="disabled")
+            except Exception as e:
+                txt.config(state="normal")
+                txt.delete("1.0", "end")
+                txt.insert("end", f"Error: {e}\n", "ascii")
+                txt.config(state="disabled")
+
+        tk.Button(inp_f, text="▶ LOAD", fg=BTN_FG, bg=ACCENT, font=(FONT, 10, "bold"), bd=0,
+                  activebackground=ACCENT, command=_load).pack(side="left", padx=10)
+
+    # ---- IP INFO ----
+    def _app_ipinfo(self):
+        win = self._make_app_window("IP INFO", 700, 400)
+        frame = tk.Frame(win, bg=BG)
+        frame.pack(fill="both", expand=True)
+
+        inp_f = tk.Frame(frame, bg=BG2)
+        inp_f.pack(fill="x", padx=10, pady=5)
+        tk.Label(inp_f, text="IP:", fg=FG, bg=BG2, font=(FONT, 10)).pack(side="left", padx=5)
+        ip_var = tk.StringVar()
+        tk.Entry(inp_f, textvariable=ip_var, bg=BG, fg=FG, font=(FONT, 10), insertbackground=ACCENT, bd=0, width=30).pack(side="left", padx=5)
+
+        txt = tk.Text(frame, bg=BG, fg=FG, font=(FONT, 10), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("key", foreground=CYAN)
+        txt.tag_config("val", foreground=ACCENT)
+
+        def _lookup():
+            ip = ip_var.get().strip()
+            if not ip: return
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            txt.insert("end", f"Looking up {ip}...\n\n", "key")
+            txt.config(state="disabled")
+
+            def _t():
+                try:
+                    geo = ip_geolocate(ip)
+                except:
+                    geo = {}
+                def _show():
+                    txt.config(state="normal")
+                    txt.delete("1.0", "end")
+                    for k, v in geo.items():
+                        txt.insert("end", f"  {k:<18}", "key")
+                        txt.insert("end", f"{v}\n", "val")
+                    if not geo:
+                        txt.insert("end", "  No data returned.\n", "val")
+                    txt.config(state="disabled")
+                self.after(0, _show)
+            threading.Thread(target=_t, daemon=True).start()
+
+        tk.Button(inp_f, text="▶ LOOKUP", fg=BTN_FG, bg=ACCENT, font=(FONT, 10, "bold"), bd=0,
+                  activebackground=ACCENT, command=_lookup).pack(side="left", padx=10)
+
+    # ---- CALCULATOR ----
+    def _app_calculator(self):
+        win = self._make_app_window("CALCULATOR", 400, 350)
+        frame = tk.Frame(win, bg=BG)
+        frame.pack(fill="both", expand=True)
+
+        display_var = tk.StringVar(value="0")
+        display = tk.Label(frame, textvariable=display_var, fg=ACCENT, bg=BG2, font=(FONT, 20, "bold"),
+                           anchor="e", padx=15, pady=10)
+        display.pack(fill="x", padx=10, pady=5)
+
+        def _safe_calc(expr):
+            """Evaluate a math expression safely without using eval()"""
+            allowed = set('0123456789+-*/(). ')
+            if not all(c in allowed for c in expr):
+                raise ValueError("Invalid characters")
+            node = ast.parse(expr, mode='eval')
+            for n in ast.walk(node):
+                if isinstance(n, ast.Constant):
+                    if not isinstance(n.value, (int, float)):
+                        raise ValueError(f"Unsupported constant: {type(n.value).__name__}")
+                    continue
+                if isinstance(n, (ast.Expression, ast.BinOp, ast.UnaryOp,
+                                  ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow,
+                                  ast.USub, ast.UAdd, ast.Mod, ast.FloorDiv)):
+                    continue
+                raise ValueError(f"Unsupported operation: {type(n).__name__}")
+            code = compile(node, '<calc>', 'eval')
+            return eval(code, {"__builtins__": {}}, {})  # noqa: S307 - safe: AST-validated math only
+
+        expr_parts = [""]
+
+        def _press(val):
+            if val == "C":
+                expr_parts[0] = ""
+                display_var.set("0")
+            elif val == "=":
+                try:
+                    result = str(_safe_calc(expr_parts[0]))
+                    display_var.set(result)
+                    expr_parts[0] = result
+                except:
+                    display_var.set("ERR")
+                    expr_parts[0] = ""
+            else:
+                expr_parts[0] += str(val)
+                display_var.set(expr_parts[0])
+
+        btn_frame = tk.Frame(frame, bg=BG)
+        btn_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        buttons = [
+            ["7", "8", "9", "/"],
+            ["4", "5", "6", "*"],
+            ["1", "2", "3", "-"],
+            ["0", ".", "=", "+"],
+            ["C", "(", ")", "**"],
+        ]
+        for row in buttons:
+            rf = tk.Frame(btn_frame, bg=BG)
+            rf.pack(fill="x", expand=True)
+            for b in row:
+                tk.Button(rf, text=b, fg=FG, bg=BG2, font=(FONT, 14, "bold"), bd=0,
+                          activebackground=ACCENT, activeforeground=BTN_FG, width=4, height=1,
+                          command=lambda v=b: _press(v)).pack(side="left", expand=True, fill="both", padx=2, pady=2)
+
+    # ---- NOTES ----
+    def _app_notes(self):
+        win = self._make_app_window("NOTES", 600, 500)
+        txt = tk.Text(win, bg=BG, fg=FG, font=(FONT, 11), bd=0, padx=10, pady=10,
+                      insertbackground=ACCENT)
+        txt.pack(fill="both", expand=True)
+        txt.insert("1.0", self._app_notes_data)
+
+        def _on_close():
+            self._app_notes_data = txt.get("1.0", "end-1c")
+            self._close_app()
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+    # ---- EXPLOITS ----
+    def _app_exploits(self):
+        win = self._make_app_window("EXPLOIT DATABASE", 800, 500)
+        txt = tk.Text(win, bg=BG, fg=FG, font=(FONT, 10), bd=0, padx=10, pady=10, state="disabled")
+        txt.pack(fill="both", expand=True)
+        txt.tag_config("hdr", foreground=CYAN, font=(FONT, 10, "bold"))
+        txt.tag_config("cmd", foreground=ACCENT)
+        txt.tag_config("dim", foreground=FG_DIM)
+
+        exploits = [
+            ("ARP Spoof (MITM)", "techbot arpspoof <target> <gateway>", "Poison ARP cache to intercept traffic"),
+            ("DNS Spoof", "techbot dnsspoof <domain> <ip>", "Redirect DNS queries to attacker IP"),
+            ("UDP Flood", "techbot flood <ip> <port>", "Stress test with UDP packet flood"),
+            ("Protocol Fuzz", "techbot fuzz <ip>", "Send malformed packets to target"),
+            ("Reverse Shell", "techbot shell <port>", "Start listener + generate payloads"),
+            ("HTTP Brute", "techbot brute <url>", "Basic auth credential stuffing"),
+            ("Dir Buster", "techbot dirbust <url>", "Brute-force hidden web directories"),
+            ("WiFi Crack", "techbot wifi crack <SSID> <hash>", "Offline WPA2 hash cracking"),
+            ("Deauth Attack", "techbot gethash bssid=XX deauth=YY", "Force WPA handshake capture"),
+            ("Network Broadcast", "techbot broadcast <msg>", "Send message to all LAN devices"),
+            ("Hash Cracker", "techbot hashcat <hash>", "CPU-based hash cracking with mutations"),
+            ("Packet Sniffer", "techbot sniff", "Live packet capture with protocol detection"),
+        ]
+
+        txt.config(state="normal")
+        txt.insert("end", "AVAILABLE EXPLOIT TECHNIQUES\n", "hdr")
+        txt.insert("end", "─" * 70 + "\n\n", "hdr")
+        for name, cmd, desc in exploits:
+            txt.insert("end", f"  {name}\n", "cmd")
+            txt.insert("end", f"    Command: {cmd}\n", "dim")
+            txt.insert("end", f"    {desc}\n\n", "dim")
+        txt.config(state="disabled")
+
+    # ---- VOICE ----
+    def _app_voice(self):
+        win = self._make_app_window("VOICE CONTROL", 500, 300)
+        frame = tk.Frame(win, bg=BG)
+        frame.pack(fill="both", expand=True)
+
+        status_var = tk.StringVar(value="Voice control ready")
+        tk.Label(frame, textvariable=status_var, fg=ACCENT, bg=BG, font=(FONT, 12, "bold")).pack(pady=20)
+
+        def _toggle():
+            if self.voice_active:
+                self.voice_active = False
+                status_var.set("Voice OFF")
+                btn.config(text="▶ START LISTENING", bg=ACCENT)
+            else:
+                self.voice_active = True
+                status_var.set("Listening... say 'techbot' + command")
+                btn.config(text="⬛ STOP", bg=RED)
+                threading.Thread(target=self._voice_loop_for_app, args=(status_var,), daemon=True).start()
+
+        btn = tk.Button(frame, text="▶ START LISTENING", fg=BTN_FG, bg=ACCENT, font=(FONT, 14, "bold"),
+                        bd=0, activebackground=ACCENT, command=_toggle)
+        btn.pack(pady=10)
+
+        tk.Label(frame, text="Say 'techbot <command>' to execute", fg=FG_DIM, bg=BG, font=(FONT, 9)).pack(pady=10)
+
+    def _voice_loop_for_app(self, status_var):
+        """Voice listening loop for the voice app"""
+        while self.voice_active and self.running:
+            try:
+                with sr.Microphone() as source:
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=8)
+                    text = self.recognizer.recognize_google(audio).lower()
+                    self.after(0, lambda t=text: status_var.set(f"Heard: {t}"))
+                    if text.startswith("techbot"):
+                        self.after(0, lambda t=text: self.entry.insert(0, t))
+                        self.after(100, lambda: self.on_enter())
+            except sr.WaitTimeoutError:
+                pass
+            except sr.UnknownValueError:
+                pass
+            except Exception:
+                break
 
     def _update_ui_glow(self):
         """CRT-style pulse glow for borders and labels"""
