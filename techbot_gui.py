@@ -4258,6 +4258,9 @@ class TechBotGUI(ctk.CTk):
 
     def _make_app_window(self, title, width=800, height=600):
         """Create a standard Toplevel app window with theme"""
+        # Close any existing app window first to prevent resource leaks
+        self._close_app()
+
         win = tk.Toplevel(self)
         win.title(f"TECHBOT // {title}")
         win.geometry(f"{width}x{height}")
@@ -5043,12 +5046,16 @@ class TechBotGUI(ctk.CTk):
 
         def _safe_calc(expr):
             """Evaluate a math expression safely without using eval()"""
-            allowed = set('0123456789+-*/().** ')
+            allowed = set('0123456789+-*/(). ')
             if not all(c in allowed for c in expr):
                 raise ValueError("Invalid characters")
             node = ast.parse(expr, mode='eval')
             for n in ast.walk(node):
-                if isinstance(n, (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+                if isinstance(n, ast.Constant):
+                    if not isinstance(n.value, (int, float)):
+                        raise ValueError(f"Unsupported constant: {type(n.value).__name__}")
+                    continue
+                if isinstance(n, (ast.Expression, ast.BinOp, ast.UnaryOp,
                                   ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow,
                                   ast.USub, ast.UAdd, ast.Mod, ast.FloorDiv)):
                     continue
