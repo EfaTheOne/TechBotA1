@@ -20,6 +20,7 @@ import string
 import struct
 import json
 import re
+import ast
 import http.client
 import codecs
 import requests
@@ -2672,7 +2673,7 @@ class TechBotGUI(ctk.CTk):
         self.cprint("    app dashboard                     System overview (CPU/RAM/NET)", "dim")
         self.cprint("    app monitor                       Live CPU, RAM, NET graphs", "dim")
         self.cprint("    app topology                      Network topology map", "dim")
-        self.cprint("    app connections                    Active network connections", "dim")
+        self.cprint("    app connections                   Active network connections", "dim")
         self.cprint("    app nettraffic                    Network throughput graph", "dim")
         self.cprint("    app sniffer                       Live packet capture", "dim")
         self.cprint("    app geotarget                     Geo-IP lookup for connections", "dim")
@@ -4893,7 +4894,7 @@ class TechBotGUI(ctk.CTk):
                 for line in lines:
                     txt.insert("end", line + "\n", "rule" if "Enabled" in line or "ACCEPT" in line else "dim")
                 if len(out.split('\n')) > 200:
-                    txt.insert("end", f"\n... ({len(out.split(chr(10)))} total lines, showing first 200)\n", "dim")
+                    txt.insert("end", f"\n... ({len(out.split('\n'))} total lines, showing first 200)\n", "dim")
                 txt.config(state="disabled")
             self.after(0, _show)
         threading.Thread(target=_t, daemon=True).start()
@@ -5040,6 +5041,21 @@ class TechBotGUI(ctk.CTk):
                            anchor="e", padx=15, pady=10)
         display.pack(fill="x", padx=10, pady=5)
 
+        def _safe_calc(expr):
+            """Evaluate a math expression safely without using eval()"""
+            allowed = set('0123456789+-*/().** ')
+            if not all(c in allowed for c in expr):
+                raise ValueError("Invalid characters")
+            node = ast.parse(expr, mode='eval')
+            for n in ast.walk(node):
+                if isinstance(n, (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+                                  ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow,
+                                  ast.USub, ast.UAdd, ast.Mod, ast.FloorDiv)):
+                    continue
+                raise ValueError(f"Unsupported operation: {type(n).__name__}")
+            code = compile(node, '<calc>', 'eval')
+            return eval(code, {"__builtins__": {}}, {})  # noqa: S307 - safe: AST-validated math only
+
         expr_parts = [""]
 
         def _press(val):
@@ -5048,7 +5064,7 @@ class TechBotGUI(ctk.CTk):
                 display_var.set("0")
             elif val == "=":
                 try:
-                    result = str(eval(expr_parts[0]))  # simple calc
+                    result = str(_safe_calc(expr_parts[0]))
                     display_var.set(result)
                     expr_parts[0] = result
                 except:
