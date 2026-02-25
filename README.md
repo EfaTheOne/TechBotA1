@@ -1,2 +1,2 @@
 # TechBotA1
-python -m pip install customtkinter psutil Pillow pyttsx3 SpeechRecognition groq pyaudio requests cryptography scapy pyautogui beautifulsoup4
+TechBotA1 is a multi-purpose reconnaissance and attacking program designed for cybersecurity research on AUTHERIZED networks.
