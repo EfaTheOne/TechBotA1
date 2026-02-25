@@ -1,1 +1,2 @@
 # TechBotA1
+python -m pip install customtkinter psutil Pillow pyttsx3 SpeechRecognition groq pyaudio requests cryptography scapy pyautogui beautifulsoup4
