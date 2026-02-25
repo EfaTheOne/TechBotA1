@@ -1,0 +1,1162 @@
+"""
+EliteSnifferEngine v2.0 — Wireshark-Grade Packet Analysis Engine
+──────────────────────────────────────────────────────────────────
+Deep packet dissection, URL/domain tracking, display filters,
+protocol statistics, flow tracking, and PCAP export.
+Only requires: scapy
+"""
+
+import threading
+import datetime
+import os
+import re
+import time
+import struct
+from collections import defaultdict, OrderedDict
+
+try:
+    import scapy.all as scapy
+    from scapy.layers.inet import IP, TCP, UDP, ICMP
+    from scapy.layers.l2 import Ether, ARP
+    from scapy.layers.dns import DNS, DNSQR, DNSRR
+    from scapy.packet import Raw
+    from scapy.utils import wrpcap
+    from scapy.config import conf
+    SCAPY_OK = True
+except ImportError:
+    SCAPY_OK = False
+
+# Dot11/EAPOL — separate import so WiFi layer failures don't break the engine
+HAS_DOT11 = False
+HAS_EAPOL = False
+try:
+    from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Auth, Dot11AssoReq
+    HAS_DOT11 = True
+except Exception:
+    Dot11 = None
+try:
+    from scapy.layers.eap import EAPOL
+    HAS_EAPOL = True
+except Exception:
+    try:
+        from scapy.all import EAPOL
+        HAS_EAPOL = True
+    except Exception:
+        EAPOL = None
+
+
+# ═══════════════════════════════════════════════════
+# TLS SNI Extraction (manual parse — no extra deps)
+# ═══════════════════════════════════════════════════
+
+def extract_tls_sni(raw_bytes):
+    """Extract Server Name Indication from a TLS ClientHello."""
+    try:
+        if len(raw_bytes) < 6:
+            return None
+        # TLS record: type 0x16 (handshake), version, length
+        if raw_bytes[0] != 0x16:
+            return None
+        # Handshake type 0x01 = ClientHello
+        if raw_bytes[5] != 0x01:
+            return None
+
+        # Parse ClientHello
+        offset = 5 + 4  # skip handshake header
+        if offset + 2 > len(raw_bytes):
+            return None
+        # Skip client version (2) + random (32)
+        offset += 2 + 32
+        # Skip session ID
+        if offset + 1 > len(raw_bytes):
+            return None
+        sid_len = raw_bytes[offset]
+        offset += 1 + sid_len
+        # Skip cipher suites
+        if offset + 2 > len(raw_bytes):
+            return None
+        cs_len = struct.unpack("!H", raw_bytes[offset:offset + 2])[0]
+        offset += 2 + cs_len
+        # Skip compression methods
+        if offset + 1 > len(raw_bytes):
+            return None
+        cm_len = raw_bytes[offset]
+        offset += 1 + cm_len
+        # Extensions
+        if offset + 2 > len(raw_bytes):
+            return None
+        ext_len = struct.unpack("!H", raw_bytes[offset:offset + 2])[0]
+        offset += 2
+        ext_end = offset + ext_len
+
+        while offset + 4 <= ext_end and offset + 4 <= len(raw_bytes):
+            ext_type = struct.unpack("!H", raw_bytes[offset:offset + 2])[0]
+            ext_data_len = struct.unpack("!H", raw_bytes[offset + 2:offset + 4])[0]
+            offset += 4
+            if ext_type == 0x0000:  # SNI extension
+                # SNI list length (2), type (1), name length (2), name
+                if offset + 5 <= len(raw_bytes):
+                    name_len = struct.unpack("!H", raw_bytes[offset + 3:offset + 5])[0]
+                    if offset + 5 + name_len <= len(raw_bytes):
+                        return raw_bytes[offset + 5:offset + 5 + name_len].decode('ascii', errors='ignore')
+                return None
+            offset += ext_data_len
+    except Exception:
+        pass
+    return None
+
+
+# ═══════════════════════════════════════════════════
+# Display Filter Parser
+# ═══════════════════════════════════════════════════
+
+class DisplayFilter:
+    """Wireshark-style display filter engine.
+
+    Supports:
+        protocol filters:  tcp, udp, dns, http, tls, arp, icmp
+        field filters:     ip.src == x, ip.dst == x, tcp.port == 80
+                           dns.query contains google
+                           http.url contains youtube
+                           http.host == example.com
+        logical:           and, or, not
+        bare strings:      any text → matches against info/src/dst
+    """
+
+    def __init__(self, expression=""):
+        self.expression = expression.strip()
+
+    def matches(self, pkt_info):
+        """Check if a packet info dict matches this filter."""
+        if not self.expression:
+            return True
+        try:
+            return self._eval(self.expression, pkt_info)
+        except Exception:
+            return True  # On parse error, show all
+
+    def _eval(self, expr, p):
+        expr = expr.strip()
+        if not expr:
+            return True
+
+        # Handle 'or'
+        or_parts = self._split_logical(expr, ' or ')
+        if len(or_parts) > 1:
+            return any(self._eval(part, p) for part in or_parts)
+
+        # Handle 'and'
+        and_parts = self._split_logical(expr, ' and ')
+        if len(and_parts) > 1:
+            return all(self._eval(part, p) for part in and_parts)
+
+        # Handle 'not'
+        if expr.startswith('not ') or expr.startswith('!'):
+            inner = expr[4:] if expr.startswith('not ') else expr[1:]
+            return not self._eval(inner.strip(), p)
+
+        # Handle parentheses
+        if expr.startswith('(') and expr.endswith(')'):
+            return self._eval(expr[1:-1], p)
+
+        # Handle comparison: field == value, field != value, field contains value
+        for op in [' contains ', ' == ', ' != ', ' >= ', ' <= ', ' > ', ' < ']:
+            if op in expr.lower():
+                idx = expr.lower().index(op)
+                field = expr[:idx].strip().lower()
+                value = expr[idx + len(op):].strip().strip('"').strip("'")
+                return self._compare(field, op.strip(), value, p)
+
+        # Bare protocol name
+        proto_lower = expr.lower()
+        pkt_proto = p.get("proto", "").lower()
+        if proto_lower in ("tcp", "udp", "dns", "http", "tls", "arp", "icmp", "ip", "raw"):
+            if proto_lower == "ip":
+                return p.get("src", "???") != "???"
+            return pkt_proto == proto_lower
+
+        # Bare text search — match against info, src, dst, urls
+        search = expr.lower()
+        searchable = f"{p.get('info', '')} {p.get('src', '')} {p.get('dst', '')} {' '.join(p.get('urls', []))} {' '.join(p.get('domains', []))}".lower()
+        return search in searchable
+
+    def _compare(self, field, op, value, p):
+        # Resolve field value
+        actual = self._resolve_field(field, p)
+        if actual is None:
+            return False
+
+        if op == 'contains':
+            return value.lower() in str(actual).lower()
+        elif op == '==':
+            return str(actual).lower() == value.lower()
+        elif op == '!=':
+            return str(actual).lower() != value.lower()
+        try:
+            a, b = float(actual), float(value)
+            if op == '>': return a > b
+            if op == '<': return a < b
+            if op == '>=': return a >= b
+            if op == '<=': return a <= b
+        except (ValueError, TypeError):
+            pass
+        return False
+
+    def _resolve_field(self, field, p):
+        field_map = {
+            'ip.src': p.get('src'),
+            'ip.dst': p.get('dst'),
+            'src': p.get('src'),
+            'dst': p.get('dst'),
+            'protocol': p.get('proto'),
+            'proto': p.get('proto'),
+            'tcp.srcport': p.get('sport'),
+            'tcp.dstport': p.get('dport'),
+            'tcp.port': p.get('sport') or p.get('dport'),
+            'udp.srcport': p.get('sport'),
+            'udp.dstport': p.get('dport'),
+            'udp.port': p.get('sport') or p.get('dport'),
+            'port': p.get('sport') or p.get('dport'),
+            'len': p.get('len'),
+            'length': p.get('len'),
+            'info': p.get('info'),
+            'dns.query': ' '.join(p.get('domains', [])),
+            'dns.name': ' '.join(p.get('domains', [])),
+            'http.url': ' '.join(p.get('urls', [])),
+            'http.host': p.get('http_host', ''),
+            'http.method': p.get('http_method', ''),
+            'tls.sni': p.get('tls_sni', ''),
+            'tcp.flags': p.get('tcp_flags_str', ''),
+        }
+        return field_map.get(field)
+
+    def _split_logical(self, expr, keyword):
+        """Split on keyword but respect parentheses."""
+        parts = []
+        depth = 0
+        current = ""
+        i = 0
+        kw_lower = keyword.lower()
+        while i < len(expr):
+            if expr[i] == '(':
+                depth += 1
+            elif expr[i] == ')':
+                depth -= 1
+            if depth == 0 and expr[i:i + len(keyword)].lower() == kw_lower:
+                parts.append(current)
+                current = ""
+                i += len(keyword)
+                continue
+            current += expr[i]
+            i += 1
+        parts.append(current)
+        return parts if len(parts) > 1 else [expr]
+
+
+# ═══════════════════════════════════════════════════
+# Protocol Statistics Tracker
+# ═══════════════════════════════════════════════════
+
+class ProtocolStats:
+    """Real-time protocol statistics aggregator."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.proto_counts = defaultdict(int)
+        self.proto_bytes = defaultdict(int)
+        self.ip_src_counts = defaultdict(int)
+        self.ip_dst_counts = defaultdict(int)
+        self.total_packets = 0
+        self.total_bytes = 0
+        self.start_time = None
+        self.domains_seen = OrderedDict()   # domain → count
+        self.urls_seen = OrderedDict()      # url → count
+
+    def record(self, pkt_info):
+        with self.lock:
+            if self.start_time is None:
+                self.start_time = time.time()
+            proto = pkt_info.get("proto", "RAW")
+            plen = pkt_info.get("len", 0)
+            self.proto_counts[proto] += 1
+            self.proto_bytes[proto] += plen
+            self.total_packets += 1
+            self.total_bytes += plen
+
+            src = pkt_info.get("src", "???")
+            dst = pkt_info.get("dst", "???")
+            if src != "???":
+                self.ip_src_counts[src] += 1
+            if dst != "???":
+                self.ip_dst_counts[dst] += 1
+
+            for d in pkt_info.get("domains", []):
+                self.domains_seen[d] = self.domains_seen.get(d, 0) + 1
+            for u in pkt_info.get("urls", []):
+                self.urls_seen[u] = self.urls_seen.get(u, 0) + 1
+
+    def get_snapshot(self):
+        with self.lock:
+            elapsed = time.time() - self.start_time if self.start_time else 0
+            pps = self.total_packets / elapsed if elapsed > 0 else 0
+            bps = self.total_bytes / elapsed if elapsed > 0 else 0
+            top_domains = sorted(self.domains_seen.items(), key=lambda x: -x[1])[:20]
+            top_urls = sorted(self.urls_seen.items(), key=lambda x: -x[1])[:20]
+            top_src = sorted(self.ip_src_counts.items(), key=lambda x: -x[1])[:10]
+            top_dst = sorted(self.ip_dst_counts.items(), key=lambda x: -x[1])[:10]
+            return {
+                "proto_counts": dict(self.proto_counts),
+                "proto_bytes": dict(self.proto_bytes),
+                "total_packets": self.total_packets,
+                "total_bytes": self.total_bytes,
+                "elapsed": elapsed,
+                "pps": pps,
+                "bps": bps,
+                "top_domains": top_domains,
+                "top_urls": top_urls,
+                "top_src": top_src,
+                "top_dst": top_dst,
+            }
+
+    def reset(self):
+        with self.lock:
+            self.proto_counts.clear()
+            self.proto_bytes.clear()
+            self.ip_src_counts.clear()
+            self.ip_dst_counts.clear()
+            self.total_packets = 0
+            self.total_bytes = 0
+            self.start_time = None
+            self.domains_seen.clear()
+            self.urls_seen.clear()
+
+
+# ═══════════════════════════════════════════════════
+# TCP Flow / Connection Tracker
+# ═══════════════════════════════════════════════════
+
+class FlowTracker:
+    """Track TCP/UDP connections and their states."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.flows = {}  # (src, dst, sport, dport, proto) → flow_info
+
+    def record(self, pkt_info):
+        src = pkt_info.get("src", "???")
+        dst = pkt_info.get("dst", "???")
+        sport = pkt_info.get("sport", 0)
+        dport = pkt_info.get("dport", 0)
+        proto = pkt_info.get("proto", "RAW")
+
+        if proto not in ("TCP", "UDP", "HTTP", "TLS", "DNS"):
+            return
+
+        # Normalize flow key (lower IP first for bidirectional)
+        if (src, sport) > (dst, dport):
+            key = (dst, src, dport, sport, proto)
+        else:
+            key = (src, dst, sport, dport, proto)
+
+        with self.lock:
+            if key not in self.flows:
+                self.flows[key] = {
+                    "src": src, "dst": dst, "sport": sport, "dport": dport,
+                    "proto": proto, "packets": 0, "bytes": 0,
+                    "start": pkt_info.get("time", ""),
+                    "last": pkt_info.get("time", ""),
+                    "state": "ACTIVE",
+                }
+            flow = self.flows[key]
+            flow["packets"] += 1
+            flow["bytes"] += pkt_info.get("len", 0)
+            flow["last"] = pkt_info.get("time", "")
+
+            # TCP state tracking
+            flags = pkt_info.get("tcp_flags", 0)
+            if flags:
+                if flags & 0x02:  # SYN
+                    flow["state"] = "SYN_SENT"
+                if flags & 0x12 == 0x12:  # SYN-ACK
+                    flow["state"] = "ESTABLISHED"
+                if flags & 0x01:  # FIN
+                    flow["state"] = "CLOSING"
+                if flags & 0x04:  # RST
+                    flow["state"] = "RESET"
+
+    def get_flows(self):
+        with self.lock:
+            return list(self.flows.values())
+
+    def reset(self):
+        with self.lock:
+            self.flows.clear()
+
+
+# ═══════════════════════════════════════════════════
+# WPA 4-Way Handshake Tracker
+# ═══════════════════════════════════════════════════
+
+class HandshakeTracker:
+    """Track WPA/WPA2 4-way EAPOL handshakes and extract hash data."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        # bssid → {"messages": {1:pkt,2:pkt,3:pkt,4:pkt}, "client": mac, "packets": [raw], ...}
+        self.handshakes = {}  # bssid → handshake_info
+        self.eapol_log = []   # all EAPOL events for display
+
+    def record_eapol(self, pkt, pkt_info):
+        """Analyze an EAPOL packet and track handshake progress."""
+        try:
+            # Get raw EAPOL-Key bytes from pkt_info (already parsed by dissect)
+            # or try to extract from the packet directly
+            raw_load = b''
+            if HAS_EAPOL and EAPOL is not None and pkt.haslayer(EAPOL):
+                eapol_layer = pkt[EAPOL]
+                raw_load = bytes(eapol_layer.payload) if eapol_layer.payload else bytes(eapol_layer)[4:]
+            elif pkt.haslayer(Ether) and pkt[Ether].type == 0x888E:
+                full_raw = bytes(pkt[Ether].payload)
+                raw_load = full_raw[4:] if len(full_raw) > 4 else b''
+            elif pkt.haslayer(Raw):
+                raw_load = bytes(pkt[Raw].load)
+                if len(raw_load) > 4 and raw_load[1] == 3:
+                    raw_load = raw_load[4:]
+                else:
+                    raw_load = b''
+
+            # Determine BSSID and client
+            bssid = pkt_info.get('eapol_bssid', None) or pkt_info.get('dst', 'unknown')
+            client = pkt_info.get('src', 'unknown')
+
+            if HAS_DOT11 and Dot11 is not None and pkt.haslayer(Dot11):
+                dot11 = pkt[Dot11]
+                bssid = dot11.addr3 if dot11.addr3 else dot11.addr2
+                if dot11.addr1 and dot11.addr1 != bssid:
+                    client = dot11.addr1
+                elif dot11.addr2 and dot11.addr2 != bssid:
+                    client = dot11.addr2
+            elif pkt.haslayer(Ether):
+                bssid = pkt[Ether].dst
+                client = pkt[Ether].src
+
+            bssid = bssid.lower() if bssid else 'unknown'
+            client = client.lower() if client else 'unknown'
+
+            # Parse EAPOL Key frame to determine message number
+            msg_num = self._detect_message_num(raw_load)
+
+            # Extract key data
+            anonce = None
+            snonce = None
+            mic = None
+
+            if len(raw_load) >= 76:
+                nonce_offset = 13
+                nonce = raw_load[nonce_offset:nonce_offset + 32]
+                mic_offset = 77
+                if len(raw_load) > mic_offset + 16:
+                    mic = raw_load[mic_offset:mic_offset + 16]
+
+                if msg_num == 1:
+                    anonce = nonce
+                elif msg_num == 2:
+                    snonce = nonce
+                elif msg_num == 3:
+                    anonce = nonce
+
+            with self.lock:
+                if bssid not in self.handshakes:
+                    self.handshakes[bssid] = {
+                        "bssid": bssid,
+                        "client": client,
+                        "messages": {},
+                        "packets": [],
+                        "anonce": None,
+                        "snonce": None,
+                        "mic": None,
+                        "complete": False,
+                        "time": pkt_info.get("time", ""),
+                    }
+
+                hs = self.handshakes[bssid]
+                if client != 'unknown':
+                    hs["client"] = client
+                hs["messages"][msg_num] = pkt
+                hs["packets"].append(pkt)
+                hs["time"] = pkt_info.get("time", "")
+
+                if anonce:
+                    hs["anonce"] = anonce.hex()
+                if snonce:
+                    hs["snonce"] = snonce.hex()
+                if mic and msg_num == 2:
+                    hs["mic"] = mic.hex()
+
+                # Complete if we have M1+M2 (enough for cracking)
+                if 1 in hs["messages"] and 2 in hs["messages"]:
+                    hs["complete"] = True
+
+                event = {
+                    "time": pkt_info.get("time", ""),
+                    "bssid": bssid,
+                    "client": client,
+                    "msg_num": msg_num,
+                    "has_nonce": anonce is not None or snonce is not None,
+                    "has_mic": mic is not None,
+                    "complete": hs["complete"],
+                    "total_msgs": len(hs["messages"]),
+                }
+                self.eapol_log.append(event)
+                return event
+
+        except Exception as e:
+            self.eapol_log.append({
+                "time": pkt_info.get("time", ""), "bssid": "error", "client": "",
+                "msg_num": 0, "has_nonce": False, "has_mic": False,
+                "complete": False, "total_msgs": 0, "error": str(e),
+            })
+        return None
+
+    def _detect_message_num(self, key_data):
+        """Detect which of the 4 EAPOL-Key messages this is."""
+        if len(key_data) < 6:
+            return 0
+        try:
+            key_info = struct.unpack('!H', key_data[1:3])[0]
+        except struct.error:
+            return 0
+
+        has_ack = bool(key_info & 0x0080)
+        has_mic = bool(key_info & 0x0100)
+        has_secure = bool(key_info & 0x0200)
+        has_install = bool(key_info & 0x0040)
+
+        if has_ack and not has_mic:
+            return 1
+        if not has_ack and has_mic and not has_secure:
+            return 2
+        if has_ack and has_mic and has_install:
+            return 3
+        if not has_ack and has_mic and has_secure:
+            return 4
+        if has_ack and has_mic:
+            return 3
+        if has_mic:
+            return 2
+        return 0
+
+    def get_handshakes(self):
+        """Return a list of all tracked handshakes."""
+        with self.lock:
+            return [dict(v, packets_count=len(v['packets'])) for v in self.handshakes.values()]
+
+    def get_log(self):
+        """Return the EAPOL event log."""
+        with self.lock:
+            return list(self.eapol_log)
+
+    def export_handshake(self, bssid, storage_path="captures"):
+        """Export captured handshake packets to a .cap file for hashcat/aircrack."""
+        bssid = bssid.lower()
+        with self.lock:
+            hs = self.handshakes.get(bssid)
+            if not hs or not hs["packets"]:
+                return None, 0
+            pkts = list(hs["packets"])
+
+        safe_bssid = bssid.replace(':', '')
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        fname = os.path.join(storage_path, f"handshake_{safe_bssid}_{ts}.cap")
+        wrpcap(fname, pkts)
+        return fname, len(pkts)
+
+    def get_hash_string(self, bssid):
+        """Generate hash info summary for the captured handshake."""
+        bssid = bssid.lower()
+        with self.lock:
+            hs = self.handshakes.get(bssid)
+            if not hs:
+                return None
+
+            lines = []
+            lines.append(f"BSSID:    {hs['bssid']}")
+            lines.append(f"Client:   {hs['client']}")
+            lines.append(f"Messages: {sorted(hs['messages'].keys())}")
+            lines.append(f"Complete: {'YES ✓' if hs['complete'] else 'Waiting...'}")
+            if hs.get('anonce'):
+                lines.append(f"ANonce:   {hs['anonce']}")
+            if hs.get('snonce'):
+                lines.append(f"SNonce:   {hs['snonce']}")
+            if hs.get('mic'):
+                lines.append(f"MIC:      {hs['mic']}")
+            if hs['complete']:
+                lines.append("")
+                lines.append("Hash can be cracked with:")
+                safe = bssid.replace(':', '')
+                lines.append(f"  hashcat -m 22000 handshake_{safe}_*.cap wordlist.txt")
+                lines.append(f"  aircrack-ng -w wordlist.txt handshake_{safe}_*.cap")
+            return "\n".join(lines)
+
+    def reset(self):
+        with self.lock:
+            self.handshakes.clear()
+            self.eapol_log.clear()
+
+
+# ═══════════════════════════════════════════════════
+# Main Sniffer Engine
+# ═══════════════════════════════════════════════════
+
+TCP_FLAGS_MAP = {
+    'F': 0x01, 'S': 0x02, 'R': 0x04, 'P': 0x08,
+    'A': 0x10, 'U': 0x20, 'E': 0x40, 'C': 0x80,
+}
+
+def tcp_flags_to_str(flags):
+    """Convert TCP flags int to human-readable string like [SYN, ACK]."""
+    names = []
+    flag_names = [
+        (0x02, "SYN"), (0x10, "ACK"), (0x01, "FIN"), (0x04, "RST"),
+        (0x08, "PSH"), (0x20, "URG"), (0x40, "ECE"), (0x80, "CWR"),
+    ]
+    for mask, name in flag_names:
+        if flags & mask:
+            names.append(name)
+    return ", ".join(names) if names else "NONE"
+
+
+class EliteSnifferEngine:
+    """Wireshark-grade packet capture and analysis engine."""
+
+    def __init__(self, interface=None, storage_path="captures"):
+        self.interface = interface
+        self.storage_path = storage_path
+        self.is_running = False
+        self.stop_event = threading.Event()
+        self.stats = ProtocolStats()
+        self.flows = FlowTracker()
+        self.handshakes = HandshakeTracker()
+        self.raw_packets = []       # raw scapy packets for PCAP export
+        self.raw_lock = threading.Lock()
+        self.max_raw = 50000        # max packets to keep in memory
+        self._sniff_thread = None
+
+        if not os.path.exists(storage_path):
+            os.makedirs(storage_path)
+
+    def start_capture(self, callback, bpf_filter=None):
+        """Start sniffing in a background thread. callback(pkt_info_dict) per packet."""
+        if self.is_running:
+            return
+        self.is_running = True
+        self.stop_event.clear()
+        self.stats.reset()
+        self.flows.reset()
+        self.handshakes.reset()
+        with self.raw_lock:
+            self.raw_packets.clear()
+
+        iface = self.interface
+        if not iface:
+            try:
+                iface = conf.iface
+            except Exception:
+                iface = None
+
+        def _sniff_worker():
+            try:
+                def _handler(pkt):
+                    if self.stop_event.is_set():
+                        return
+                    info = self.dissect(pkt)
+                    # Store raw
+                    with self.raw_lock:
+                        if len(self.raw_packets) < self.max_raw:
+                            self.raw_packets.append(pkt)
+                    # Track stats & flows
+                    self.stats.record(info)
+                    self.flows.record(info)
+                    # Notify UI
+                    callback(info)
+
+                scapy.sniff(
+                    iface=iface,
+                    prn=_handler,
+                    filter=bpf_filter if bpf_filter else None,
+                    store=0,
+                    stop_filter=lambda x: self.stop_event.is_set()
+                )
+            except Exception as e:
+                callback({"error": str(e), "proto": "ERROR", "src": "ENGINE", "dst": "UI",
+                          "time": datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3],
+                          "len": 0, "info": f"Capture error: {e}", "domains": [], "urls": []})
+            finally:
+                self.is_running = False
+
+        self._sniff_thread = threading.Thread(target=_sniff_worker, daemon=True)
+        self._sniff_thread.start()
+
+    def stop_capture(self):
+        """Stop the capture."""
+        self.stop_event.set()
+        self.is_running = False
+
+    def export_pcap(self, filename=None):
+        """Export captured packets to a PCAP file."""
+        if not filename:
+            ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = os.path.join(self.storage_path, f"capture_{ts}.pcap")
+        with self.raw_lock:
+            pkts = list(self.raw_packets)
+        if pkts:
+            wrpcap(filename, pkts)
+        return filename, len(pkts)
+
+    def dissect(self, pkt):
+        """Deep packet dissection — returns a rich info dictionary."""
+        info = {
+            "raw": pkt,
+            "time": datetime.datetime.fromtimestamp(pkt.time).strftime('%H:%M:%S.%f')[:-3],
+            "src": "???",
+            "dst": "???",
+            "proto": "RAW",
+            "len": len(pkt),
+            "info": pkt.summary(),
+            "sport": None,
+            "dport": None,
+            "tcp_flags": 0,
+            "tcp_flags_str": "",
+            "domains": [],
+            "urls": [],
+            "http_host": "",
+            "http_method": "",
+            "tls_sni": "",
+            "layers": [],
+        }
+
+        # ── Layer 2: Ethernet ──
+        if pkt.haslayer(Ether):
+            info["layers"].append({
+                "name": "Ethernet II",
+                "fields": [
+                    ("Source MAC", pkt[Ether].src),
+                    ("Destination MAC", pkt[Ether].dst),
+                    ("Type", hex(pkt[Ether].type)),
+                ]
+            })
+
+        # ── Layer 2: ARP ──
+        if pkt.haslayer(ARP):
+            arp = pkt[ARP]
+            info["proto"] = "ARP"
+            info["src"] = arp.psrc
+            info["dst"] = arp.pdst
+            op_str = "Request" if arp.op == 1 else "Reply" if arp.op == 2 else str(arp.op)
+            info["info"] = f"ARP {op_str}: Who has {arp.pdst}? Tell {arp.psrc}" if arp.op == 1 else f"ARP {op_str}: {arp.psrc} is at {arp.hwsrc}"
+            info["layers"].append({
+                "name": "ARP",
+                "fields": [
+                    ("Operation", op_str),
+                    ("Sender MAC", arp.hwsrc),
+                    ("Sender IP", arp.psrc),
+                    ("Target MAC", arp.hwdst),
+                    ("Target IP", arp.pdst),
+                ]
+            })
+            return info
+
+        # ── Layer 3: IP ──
+        if pkt.haslayer(IP):
+            ip = pkt[IP]
+            info["src"] = ip.src
+            info["dst"] = ip.dst
+            info["proto"] = "IP"
+            info["layers"].append({
+                "name": "Internet Protocol v4",
+                "fields": [
+                    ("Source", ip.src),
+                    ("Destination", ip.dst),
+                    ("Version", ip.version),
+                    ("Header Length", ip.ihl * 4),
+                    ("TTL", ip.ttl),
+                    ("Protocol", ip.proto),
+                    ("Total Length", ip.len),
+                    ("Identification", hex(ip.id)),
+                    ("Flags", ip.flags),
+                    ("Fragment Offset", ip.frag),
+                ]
+            })
+
+        # ── Layer 4: TCP ──
+        if pkt.haslayer(TCP):
+            tcp = pkt[TCP]
+            info["proto"] = "TCP"
+            info["sport"] = tcp.sport
+            info["dport"] = tcp.dport
+            info["tcp_flags"] = int(tcp.flags)
+            flags_str = tcp_flags_to_str(int(tcp.flags))
+            info["tcp_flags_str"] = flags_str
+            info["info"] = f"{tcp.sport} → {tcp.dport} [{flags_str}] Seq={tcp.seq} Ack={tcp.ack} Win={tcp.window}"
+            info["layers"].append({
+                "name": "Transmission Control Protocol",
+                "fields": [
+                    ("Source Port", tcp.sport),
+                    ("Destination Port", tcp.dport),
+                    ("Sequence Number", tcp.seq),
+                    ("Acknowledgment Number", tcp.ack),
+                    ("Flags", f"0x{int(tcp.flags):03x} [{flags_str}]"),
+                    ("Window Size", tcp.window),
+                    ("Checksum", hex(tcp.chksum) if tcp.chksum else "N/A"),
+                    ("Urgent Pointer", tcp.urgptr),
+                ]
+            })
+
+            # ── Application layer detection on TCP ──
+            if pkt.haslayer(Raw):
+                raw_data = bytes(pkt[Raw].load)
+
+                # HTTP Detection
+                try:
+                    text = raw_data[:2000].decode('utf-8', errors='ignore')
+                    http_methods = ["GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH "]
+                    for method in http_methods:
+                        if text.startswith(method):
+                            info["proto"] = "HTTP"
+                            lines = text.split('\r\n')
+                            request_line = lines[0]
+                            info["http_method"] = method.strip()
+                            info["info"] = request_line
+
+                            # Extract host and URL
+                            path = request_line.split(' ')[1] if len(request_line.split(' ')) > 1 else "/"
+                            host = ""
+                            header_fields = []
+                            for line in lines[1:]:
+                                if ':' in line:
+                                    k, v = line.split(':', 1)
+                                    header_fields.append((k.strip(), v.strip()))
+                                    if k.strip().lower() == 'host':
+                                        host = v.strip()
+                                        info["http_host"] = host
+
+                            if host:
+                                full_url = f"http://{host}{path}"
+                                info["urls"].append(full_url)
+                                info["domains"].append(host)
+                                info["info"] = f"{method.strip()} {full_url}"
+
+                            info["layers"].append({
+                                "name": f"Hypertext Transfer Protocol ({method.strip()})",
+                                "fields": [("Request", request_line)] + header_fields[:15]
+                            })
+                            break
+
+                    # HTTP Response
+                    if text.startswith("HTTP/"):
+                        info["proto"] = "HTTP"
+                        lines = text.split('\r\n')
+                        info["info"] = lines[0]
+                        header_fields = []
+                        for line in lines[1:]:
+                            if ':' in line:
+                                k, v = line.split(':', 1)
+                                header_fields.append((k.strip(), v.strip()))
+                            elif line == '':
+                                break
+                        info["layers"].append({
+                            "name": "Hypertext Transfer Protocol (Response)",
+                            "fields": [("Status", lines[0])] + header_fields[:15]
+                        })
+                except Exception:
+                    pass
+
+                # TLS/SSL Detection (ClientHello with SNI)
+                if info["proto"] == "TCP" and len(raw_data) > 5 and raw_data[0] == 0x16:
+                    sni = extract_tls_sni(raw_data)
+                    if sni:
+                        info["proto"] = "TLS"
+                        info["tls_sni"] = sni
+                        info["domains"].append(sni)
+                        info["info"] = f"Client Hello → {sni}"
+                        info["layers"].append({
+                            "name": "Transport Layer Security",
+                            "fields": [
+                                ("Record Type", "Handshake (0x16)"),
+                                ("Handshake Type", "Client Hello"),
+                                ("Server Name (SNI)", sni),
+                            ]
+                        })
+                    elif raw_data[0] == 0x16:
+                        info["proto"] = "TLS"
+                        # Check for other handshake types
+                        hs_type = raw_data[5] if len(raw_data) > 5 else 0
+                        hs_names = {2: "Server Hello", 11: "Certificate", 12: "Server Key Exchange",
+                                    14: "Server Hello Done", 16: "Client Key Exchange"}
+                        hs_name = hs_names.get(hs_type, f"Type {hs_type}")
+                        info["info"] = f"TLS Handshake: {hs_name}"
+                        info["layers"].append({
+                            "name": "Transport Layer Security",
+                            "fields": [
+                                ("Record Type", "Handshake (0x16)"),
+                                ("Handshake Type", hs_name),
+                            ]
+                        })
+
+                # TLS Application Data
+                if info["proto"] == "TCP" and len(raw_data) > 5 and raw_data[0] == 0x17:
+                    info["proto"] = "TLS"
+                    info["info"] = f"TLS Application Data ({len(raw_data)} bytes)"
+                    info["layers"].append({
+                        "name": "Transport Layer Security",
+                        "fields": [
+                            ("Record Type", "Application Data (0x17)"),
+                            ("Length", len(raw_data)),
+                        ]
+                    })
+
+        # ── Layer 4: UDP ──
+        elif pkt.haslayer(UDP):
+            udp = pkt[UDP]
+            info["proto"] = "UDP"
+            info["sport"] = udp.sport
+            info["dport"] = udp.dport
+            info["info"] = f"{udp.sport} → {udp.dport} Len={udp.len}"
+            info["layers"].append({
+                "name": "User Datagram Protocol",
+                "fields": [
+                    ("Source Port", udp.sport),
+                    ("Destination Port", udp.dport),
+                    ("Length", udp.len),
+                    ("Checksum", hex(udp.chksum) if udp.chksum else "N/A"),
+                ]
+            })
+
+            # ── DNS ──
+            if pkt.haslayer(DNS):
+                dns = pkt[DNS]
+                info["proto"] = "DNS"
+                dns_fields = [("Transaction ID", hex(dns.id)), ("Flags", hex(dns.qr))]
+
+                if dns.qr == 0 and pkt.haslayer(DNSQR):
+                    # DNS Query
+                    qname = pkt[DNSQR].qname.decode(errors='ignore').rstrip('.')
+                    qtype_map = {1: "A", 28: "AAAA", 5: "CNAME", 15: "MX", 2: "NS",
+                                 12: "PTR", 6: "SOA", 16: "TXT", 33: "SRV", 255: "ANY"}
+                    qtype = qtype_map.get(pkt[DNSQR].qtype, str(pkt[DNSQR].qtype))
+                    info["info"] = f"Query: {qname} ({qtype})"
+                    info["domains"].append(qname)
+                    dns_fields.extend([("Query Name", qname), ("Query Type", qtype)])
+
+                elif dns.qr == 1:
+                    # DNS Response
+                    answers = []
+                    if pkt.haslayer(DNSQR):
+                        qname = pkt[DNSQR].qname.decode(errors='ignore').rstrip('.')
+                        info["domains"].append(qname)
+                        dns_fields.append(("Query Name", qname))
+
+                    # Parse answers
+                    for i in range(dns.ancount):
+                        try:
+                            rr = dns.an[i] if hasattr(dns, 'an') and dns.an else None
+                            if rr and hasattr(rr, 'rdata'):
+                                rdata = str(rr.rdata)
+                                answers.append(rdata)
+                                dns_fields.append((f"Answer {i + 1}", f"{rr.rrname.decode(errors='ignore')} → {rdata}"))
+                        except Exception:
+                            break
+
+                    if answers:
+                        info["info"] = f"Response: {', '.join(answers[:3])}"
+                        if len(answers) > 3:
+                            info["info"] += f" (+{len(answers) - 3} more)"
+                    else:
+                        info["info"] = f"Response: {dns.ancount} answers"
+
+                info["layers"].append({"name": "Domain Name System", "fields": dns_fields})
+
+        # ── ICMP ──
+        elif pkt.haslayer(ICMP):
+            icmp = pkt[ICMP]
+            info["proto"] = "ICMP"
+            type_names = {0: "Echo Reply", 3: "Destination Unreachable", 5: "Redirect",
+                          8: "Echo Request", 11: "Time Exceeded"}
+            type_name = type_names.get(icmp.type, f"Type {icmp.type}")
+            info["info"] = f"ICMP {type_name} (type={icmp.type}, code={icmp.code})"
+            info["layers"].append({
+                "name": "Internet Control Message Protocol",
+                "fields": [
+                    ("Type", f"{icmp.type} ({type_name})"),
+                    ("Code", icmp.code),
+                    ("Checksum", hex(icmp.chksum) if icmp.chksum else "N/A"),
+                ]
+            })
+
+        # ── EAPOL (WPA Handshake) ──
+        # Detection method 1: scapy auto-dissects EAPOL layer
+        is_eapol = False
+        eapol_raw_bytes = b''
+        if HAS_EAPOL and EAPOL is not None and pkt.haslayer(EAPOL):
+            is_eapol = True
+        # Detection method 2: Check EtherType 0x888E (EAPOL over Ethernet — Windows)
+        elif pkt.haslayer(Ether) and pkt[Ether].type == 0x888E:
+            is_eapol = True
+        # Detection method 3: Scan raw bytes for EAPOL signature
+        elif pkt.haslayer(Raw):
+            raw_check = bytes(pkt[Raw].load)
+            # EAPOL version(1) + type(1) + length(2) — type 3 = EAPOL-Key
+            if len(raw_check) > 4 and raw_check[0] in (1, 2, 3) and raw_check[1] == 3:
+                is_eapol = True
+                eapol_raw_bytes = raw_check
+
+        if is_eapol:
+            info["proto"] = "EAPOL"
+
+            # Get EAPOL payload bytes
+            if HAS_EAPOL and EAPOL is not None and pkt.haslayer(EAPOL):
+                eapol_layer = pkt[EAPOL]
+                eapol_raw_bytes = bytes(eapol_layer.payload) if eapol_layer.payload else bytes(eapol_layer)[4:]
+                eapol_version = eapol_layer.version
+            else:
+                # Manual parse: skip Ether header (14 bytes) if present
+                if pkt.haslayer(Ether) and pkt[Ether].type == 0x888E:
+                    full_raw = bytes(pkt[Ether].payload)
+                    eapol_version = full_raw[0] if len(full_raw) > 0 else 0
+                    eapol_raw_bytes = full_raw[4:] if len(full_raw) > 4 else b''  # skip EAPOL header
+                else:
+                    eapol_version = eapol_raw_bytes[0] if eapol_raw_bytes else 0
+                    eapol_raw_bytes = eapol_raw_bytes[4:] if len(eapol_raw_bytes) > 4 else b''
+
+            # Determine BSSID and client
+            eapol_bssid = "unknown"
+            eapol_client = "unknown"
+
+            if HAS_DOT11 and Dot11 is not None and pkt.haslayer(Dot11):
+                dot11 = pkt[Dot11]
+                eapol_bssid = dot11.addr3 or dot11.addr2 or "unknown"
+                if dot11.addr1 and dot11.addr1 != eapol_bssid:
+                    eapol_client = dot11.addr1
+                elif dot11.addr2 and dot11.addr2 != eapol_bssid:
+                    eapol_client = dot11.addr2
+                info["src"] = dot11.addr2 or info["src"]
+                info["dst"] = dot11.addr1 or info["dst"]
+            elif pkt.haslayer(Ether):
+                # On Windows/wired: Ether src = sender, dst = receiver
+                eapol_bssid = pkt[Ether].dst
+                eapol_client = pkt[Ether].src
+                info["src"] = pkt[Ether].src
+                info["dst"] = pkt[Ether].dst
+
+            # Determine message number from EAPOL-Key data
+            msg_num = self.handshakes._detect_message_num(eapol_raw_bytes) if eapol_raw_bytes else 0
+            info["info"] = f"EAPOL Key Message {msg_num}/4 — BSSID: {eapol_bssid}"
+            info["eapol_msg"] = msg_num
+            info["eapol_bssid"] = eapol_bssid
+
+            eapol_fields = [
+                ("Type", f"EAPOL-Key (Message {msg_num}/4)"),
+                ("BSSID", eapol_bssid),
+                ("Client", eapol_client),
+                ("Version", eapol_version),
+                ("Payload Length", len(eapol_raw_bytes)),
+            ]
+
+            # Extract nonce if available
+            if len(eapol_raw_bytes) >= 45:
+                nonce = eapol_raw_bytes[13:45]
+                nonce_name = "ANonce" if msg_num in (1, 3) else "SNonce" if msg_num == 2 else "Nonce"
+                eapol_fields.append((nonce_name, nonce.hex()))
+
+            if len(eapol_raw_bytes) > 93:
+                mic = eapol_raw_bytes[77:93]
+                if any(b != 0 for b in mic):
+                    eapol_fields.append(("MIC", mic.hex()))
+
+            info["layers"].append({
+                "name": "IEEE 802.1X (EAPOL) — WPA 4-Way Handshake",
+                "fields": eapol_fields
+            })
+
+            # Track the handshake
+            self.handshakes.record_eapol(pkt, info)
+
+        # ── Raw payload layer ──
+        if pkt.haslayer(Raw):
+            raw_data = bytes(pkt[Raw].load)
+            payload_preview = raw_data[:64].decode('ascii', errors='replace')
+            info["layers"].append({
+                "name": f"Data ({len(raw_data)} bytes)",
+                "fields": [
+                    ("Length", len(raw_data)),
+                    ("Preview", payload_preview),
+                ]
+            })
+
+        return info
+
+    def get_detail_text(self, pkt_info):
+        """Format the layers list into a human-readable dissection string."""
+        lines = []
+        for layer in pkt_info.get("layers", []):
+            lines.append(f"▼ {layer['name']}")
+            for fname, fval in layer.get("fields", []):
+                lines.append(f"    {fname}: {fval}")
+            lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def get_hex_dump(data):
+        """Format binary data as a classic hex/ASCII dump."""
+        lines = []
+        for i in range(0, len(data), 16):
+            chunk = data[i:i + 16]
+            hex_part = " ".join(f"{b:02x}" for b in chunk)
+            ascii_part = "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
+            lines.append(f"{i:06x}  {hex_part:<48}  │{ascii_part}│")
+        return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════
+# Standalone test
+# ═══════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    if not SCAPY_OK:
+        print("Scapy not installed. Run: pip install scapy")
+        exit(1)
+
+    engine = EliteSnifferEngine()
+    print("Starting 10-second test capture...")
+
+    def cb(p):
+        proto = p.get("proto", "?")
+        src = p.get("src", "?")
+        dst = p.get("dst", "?")
+        info = p.get("info", "")
+        domains = p.get("domains", [])
+        urls = p.get("urls", [])
+        line = f"[{proto:^5}] {src} → {dst} | {info}"
+        if domains:
+            line += f"  DOMAIN: {', '.join(domains)}"
+        if urls:
+            line += f"  URL: {', '.join(urls)}"
+        print(line)
+
+    engine.start_capture(cb)
+    try:
+        time.sleep(10)
+    except KeyboardInterrupt:
+        pass
+    engine.stop_capture()
+
+    snap = engine.stats.get_snapshot()
+    print(f"\n── Stats ──")
+    print(f"Total: {snap['total_packets']} packets, {snap['total_bytes']} bytes")
+    print(f"Rate: {snap['pps']:.1f} pkt/s, {snap['bps']:.0f} B/s")
+    print(f"Protocols: {snap['proto_counts']}")
+    if snap['top_domains']:
+        print(f"Top Domains: {snap['top_domains'][:5]}")
+
+    fname, count = engine.export_pcap()
+    print(f"Exported {count} packets to {fname}")

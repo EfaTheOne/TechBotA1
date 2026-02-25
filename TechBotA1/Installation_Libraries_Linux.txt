@@ -1,0 +1,21 @@
+# 🚀 TECHBOT A1 PHOENIX - LINUX INSTALLATION GUIDE
+
+### OPTION 1: AUTOMATED SETUP (RECOMMENDED)
+# Run the following commands in the terminal:
+chmod +x setup_linux.sh
+./setup_linux.sh
+
+### OPTION 2: MANUAL VIRTUAL ENVIRONMENT SETUP
+# 1. Install System Dependencies
+sudo apt update && sudo apt install -y python3-dev python3-tk python3-pip python3-venv portaudio19-dev libasound2-dev libpcap-dev scrot at-spi2-core espeak ffmpeg
+
+# 2. Create and Activate Virtual Environment
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Install Python Requirements
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 4. Run the Application (needs sudo for sniffing)
+sudo ./venv/bin/python3 techbot_gui.py
