@@ -9,4 +9,7 @@ requests
 cryptography
 scapy
 pyautogui
+pygetwindow
+keyboard
 beautifulsoup4
+pywifi

@@ -1,0 +1,30 @@
+# 🚀 TECHBOT A1 PHOENIX - WINDOWS INSTALLATION GUIDE
+
+### OPTION 1: AUTOMATED SETUP USING BATCH SCRIPT (RECOMMENDED)
+# We have created an all-in-one setup batch file that checks for Python, 
+# installs it if missing, installs all dependencies, and starts the app.
+
+1. Download the project ZIP file from the GitHub repository.
+2. Extract the downloaded ZIP file to a folder (e.g., your Desktop).
+3. Open the extracted folder, and simply double-click `setup_windows.bat`.
+
+### OPTION 2: MANUAL INSTALLATION
+# If the user wants to install everything manually:
+
+1. Download & Install Python (if not installed):
+   - Go to https://www.python.org/downloads/
+   - Download the latest Python installer.
+   - RUN the installer. **CRITICAL: CHECK THE BOX "Add Python to PATH"** before clicking Install.
+
+2. Download Project Files:
+   - Download the project zip from your repository and extract it.
+   - Or run: `git clone <your-repo-url>`
+
+3. Open Command Prompt and navigate to the project directory:
+   cd path\to\TechBotA1
+
+4. Install Required Libraries:
+   pip install -r requirements.txt
+
+5. Run the Application:
+   python techbot_gui.py Or double click `run_techbot.bat`

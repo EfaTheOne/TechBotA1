@@ -12,7 +12,8 @@ import os
 import re
 import time
 import struct
-from collections import defaultdict, OrderedDict
+import collections
+from collections import defaultdict, OrderedDict, deque
 
 try:
     import scapy.all as scapy
@@ -1115,6 +1116,591 @@ class EliteSnifferEngine:
             ascii_part = "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
             lines.append(f"{i:06x}  {hex_part:<48}  │{ascii_part}│")
         return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════
+# SHADOW WALKER — Passive Vulnerability Analysis Engine
+# ═══════════════════════════════════════════════════
+
+class ShadowWalkerEngine:
+    """
+    Passive network vulnerability scanner.
+    Analyzes every packet from EliteSnifferEngine for security issues.
+    Cross-platform: Windows + Linux.
+    """
+
+    # Severity levels
+    CRITICAL = "CRITICAL"
+    HIGH     = "HIGH"
+    MEDIUM   = "MEDIUM"
+    LOW      = "LOW"
+    INFO     = "INFO"
+
+    # Well-known cleartext ports
+    CLEARTEXT_PORTS = {
+        21: "FTP", 23: "Telnet", 25: "SMTP", 80: "HTTP",
+        110: "POP3", 143: "IMAP", 161: "SNMP", 389: "LDAP",
+        513: "rlogin", 514: "rsh", 8080: "HTTP-Alt", 8000: "HTTP-Dev",
+        1080: "SOCKS", 3128: "Proxy", 5900: "VNC",
+    }
+
+    # Suspicious TLDs / known-bad domain fragments for C2 detection
+    SUSPICIOUS_TLDS = {
+        ".xyz", ".top", ".tk", ".pw", ".cc", ".su", ".ru.com",
+        ".cn.com", ".bid", ".click", ".download", ".gdn",
+        ".racing", ".review", ".stream", ".win", ".loan",
+    }
+
+    SUSPICIOUS_DOMAIN_FRAGS = {
+        "malware", "c2", "botnet", "evil", "exploit", "phish",
+        "payload", "dropper", "ransomware", "backdoor", "trojan",
+        "keylogger", "rat", "miner", "cryptojack",
+    }
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.alerts = []            # List of alert dicts
+        self.alert_count = 0
+        self.severity_counts = {self.CRITICAL: 0, self.HIGH: 0, self.MEDIUM: 0, self.LOW: 0, self.INFO: 0}
+
+        # Tracking state for stateful detections
+        self._arp_table = {}        # ip → set(mac) for ARP spoofing detection
+        self._port_scan_tracker = {}  # src_ip → {dst_ip: set(ports)} for port scan detection
+        self._port_scan_threshold = 15  # ports from same src to same dst = scan
+        self._dns_query_sizes = collections.defaultdict(lambda: collections.deque(maxlen=50)) 
+        self._dns_tunnel_threshold = 5  # consecutive large DNS queries
+        self._seen_cred_hashes = set()  # Prevent duplicate credential alerts
+        self._cleartext_sessions = {}  # (src,dst,port) → timestamp
+        self.start_time = None
+        self.total_packets_analyzed = 0
+
+        # Optimization: pre-calculate regex or patterns if any
+        self._cookie_pattern = re.compile(r"(session|token|auth|jwt)", re.IGNORECASE)
+
+    def reset(self):
+        with self.lock:
+            self.alerts.clear()
+            self.alert_count = 0
+            self.severity_counts = {self.CRITICAL: 0, self.HIGH: 0, self.MEDIUM: 0, self.LOW: 0, self.INFO: 0}
+            self._arp_table.clear()
+            self._port_scan_tracker.clear()
+            self._dns_query_sizes.clear()
+            self._seen_cred_hashes.clear()
+            self._cleartext_sessions.clear()
+            self.start_time = None
+            self.total_packets_analyzed = 0
+
+    def _add_alert(self, severity, category, title, detail, src="", dst="", proto="", raw_evidence="", exploit=""):
+        """Thread-safe alert insertion with exploit suggestion."""
+        alert = {
+            "id": self.alert_count,
+            "time": datetime.datetime.now().strftime('%H:%M:%S.%f')[:-3],
+            "severity": severity,
+            "category": category,
+            "title": title,
+            "detail": detail,
+            "src": src,
+            "dst": dst,
+            "proto": proto,
+            "evidence": str(raw_evidence)[:512],
+            "exploit": exploit
+        }
+        with self.lock:
+            self.alerts.append(alert)
+            self.alert_count += 1
+            self.severity_counts[severity] = self.severity_counts.get(severity, 0) + 1
+        return alert
+
+    def get_alerts(self, severity_filter=None, limit=500):
+        """Return alerts, optionally filtered by severity."""
+        with self.lock:
+            result = list(self.alerts)
+        if severity_filter:
+            result = [a for a in result if a["severity"] == severity_filter]
+        return result[-limit:]
+
+    def get_stats(self):
+        """Return current scanner statistics."""
+        with self.lock:
+            elapsed = (datetime.datetime.now() - self.start_time).total_seconds() if self.start_time else 0
+            return {
+                "total_analyzed": self.total_packets_analyzed,
+                "total_alerts": self.alert_count,
+                "severity": dict(self.severity_counts),
+                "elapsed": elapsed,
+                "rate": self.total_packets_analyzed / elapsed if elapsed > 0 else 0,
+            }
+
+    def analyze(self, pkt_info):
+        """
+        Main entry point. Analyze a dissected packet dict from EliteSnifferEngine.
+        Call this from the capture callback to get real-time vulnerability detection.
+        Returns a list of new alerts generated for this packet (may be empty).
+        """
+        if self.start_time is None:
+            self.start_time = datetime.datetime.now()
+
+        self.total_packets_analyzed += 1
+        new_alerts = []
+
+        proto = pkt_info.get("proto", "RAW")
+        src = pkt_info.get("src", "")
+        dst = pkt_info.get("dst", "")
+        sport = pkt_info.get("sport", 0) or 0
+        dport = pkt_info.get("dport", 0) or 0
+        info = pkt_info.get("info", "")
+        domains = pkt_info.get("domains", [])
+        urls = pkt_info.get("urls", [])
+        layers = pkt_info.get("layers", [])
+        pkt_len = pkt_info.get("len", 0)
+
+        # Optimization: Only calculate raw_text if protocols might need it
+        raw_text = ""
+        if proto in ("HTTP", "TCP", "FTP", "POP3", "IMAP", "SMTP", "Telnet"):
+            for layer in layers:
+                for fname, fval in layer.get("fields", []):
+                    if fname == "Preview":
+                        raw_text = str(fval)
+                        break
+                if raw_text: break
+
+        # 1. CLEARTEXT CREDENTIAL HARVESTING
+        if proto in ("HTTP", "TCP"):
+            new_alerts.extend(self._check_credentials(pkt_info, raw_text, src, dst, sport, dport))
+
+        # 2. UNENCRYPTED COOKIE DETECTION
+        if proto == "HTTP":
+            new_alerts.extend(self._check_cookies(pkt_info, raw_text, src, dst))
+
+        # 3. CLEARTEXT PROTOCOL USAGE
+        if proto == "TCP" and dport in self.CLEARTEXT_PORTS:
+            new_alerts.extend(self._check_cleartext_service(src, dst, dport))
+
+        # 4. WEAK / DEPRECATED TLS DETECTION
+        if proto == "TLS":
+            new_alerts.extend(self._check_tls(pkt_info, src, dst))
+
+        # 5. ARP SPOOFING DETECTION
+        if proto == "ARP":
+            new_alerts.extend(self._check_arp_spoof(pkt_info, src, dst))
+
+        # 6. SUSPICIOUS DNS (C2, Tunneling, Exfil)
+        if proto == "DNS" and domains:
+            new_alerts.extend(self._check_dns(pkt_info, domains, src, dst, pkt_len))
+
+        # 6.1 WEB VULNERABILITY DETECTION
+        if urls:
+            new_alerts.extend(self._check_web_vulnerabilities(urls, src, dst))
+
+        # 7. PORT SCAN DETECTION
+        if proto == "TCP":
+            flags = pkt_info.get("tcp_flags", 0)
+            if flags & 0x02 and not (flags & 0x10):  # SYN only
+                new_alerts.extend(self._check_port_scan(src, dst, dport))
+
+        # 8. LARGE DATA EXFILTRATION DETECTION
+        if pkt_len > 10000 and proto in ("TCP", "HTTP", "UDP"):
+            new_alerts.extend(self._check_exfiltration(src, dst, proto, pkt_len))
+
+        # 9. EAPOL / DEAUTH FLOOD DETECTION
+        if proto == "EAPOL":
+            a = self._add_alert(
+                self.HIGH, "WIRELESS", "EAPOL Handshake Detected",
+                "WPA 4-way handshake activity detected. Someone may be performing a deauth/capture attack.",
+                src=src, dst=dst, proto=proto, raw_evidence=info,
+                exploit=f"techbot gethash bssid={src}"
+            )
+            new_alerts.append(a)
+
+        return new_alerts
+
+    # ── Detection Modules ──
+
+    def _check_credentials(self, pkt_info, raw_text, src, dst, sport, dport):
+        """Detect cleartext credentials in FTP, Telnet, HTTP Basic Auth, POP3, IMAP, SMTP."""
+        alerts = []
+        text_lower = raw_text.lower()
+
+        # HTTP Basic Auth (base64 encoded but trivially decoded)
+        info_str = pkt_info.get("info", "")
+        for layer in pkt_info.get("layers", []):
+            for fname, fval in layer.get("fields", []):
+                fval_str = str(fval)
+                if "authorization" in str(fname).lower() and "basic" in fval_str.lower():
+                    cred_hash = hash(fval_str)
+                    if cred_hash not in self._seen_cred_hashes:
+                        self._seen_cred_hashes.add(cred_hash)
+                        decoded = ""
+                        try:
+                            import base64
+                            b64_part = fval_str.split("Basic ")[-1].strip()
+                            decoded = base64.b64decode(b64_part).decode(errors='ignore')
+                        except Exception:
+                            decoded = fval_str
+                        a = self._add_alert(
+                            self.CRITICAL, "CREDENTIALS",
+                            "HTTP Basic Auth Credentials (Cleartext)",
+                            f"Intercepted HTTP Basic Auth credentials in cleartext.\n"
+                            f"Decoded: {decoded}\nHeader: {fval_str}",
+                            src=src, dst=dst, proto="HTTP", raw_evidence=fval_str,
+                            exploit=f"techbot brute {src}"
+                        )
+                        alerts.append(a)
+
+        # FTP USER/PASS
+        if dport == 21 or sport == 21:
+            if "user " in text_lower or "pass " in text_lower:
+                cred_hash = hash(raw_text.strip())
+                if cred_hash not in self._seen_cred_hashes:
+                    self._seen_cred_hashes.add(cred_hash)
+                    a = self._add_alert(
+                        self.CRITICAL, "CREDENTIALS",
+                        "FTP Credentials (Cleartext)",
+                        f"FTP login credentials transmitted in cleartext.\nPayload: {raw_text.strip()[:200]}",
+                        src=src, dst=dst, proto="FTP", raw_evidence=raw_text[:200],
+                        exploit=f"techbot brute {dst}"
+                    )
+                    alerts.append(a)
+
+        # Telnet
+        if dport == 23 or sport == 23:
+            if "login:" in text_lower or "password:" in text_lower or len(raw_text.strip()) > 2:
+                cred_hash = hash(f"telnet-{src}-{dst}")
+                if cred_hash not in self._seen_cred_hashes:
+                    self._seen_cred_hashes.add(cred_hash)
+                    a = self._add_alert(
+                        self.CRITICAL, "CREDENTIALS",
+                        "Telnet Session Detected (Cleartext)",
+                        f"Active Telnet session detected. All data transmits in cleartext.\n"
+                        f"Any credentials typed are fully visible to interceptors.",
+                        src=src, dst=dst, proto="Telnet", raw_evidence=raw_text[:200],
+                        exploit=f"techbot brute {dst}"
+                    )
+                    alerts.append(a)
+
+        # POP3 / IMAP
+        if dport in (110, 143) or sport in (110, 143):
+            mail_proto = "POP3" if dport == 110 or sport == 110 else "IMAP"
+            if "user " in text_lower or "login " in text_lower or "pass " in text_lower:
+                cred_hash = hash(f"{mail_proto}-{src}-{dst}")
+                if cred_hash not in self._seen_cred_hashes:
+                    self._seen_cred_hashes.add(cred_hash)
+                    a = self._add_alert(
+                        self.CRITICAL, "CREDENTIALS",
+                        f"{mail_proto} Credentials (Cleartext)",
+                        f"Email login credentials sent over unencrypted {mail_proto}.\n"
+                        f"Payload: {raw_text.strip()[:200]}",
+                        src=src, dst=dst, proto=mail_proto, raw_evidence=raw_text[:200],
+                        exploit=f"techbot brute {dst}"
+                    )
+                    alerts.append(a)
+
+        # SMTP Auth
+        if dport == 25 or sport == 25:
+            if "auth " in text_lower or "ehlo" in text_lower:
+                cred_hash = hash(f"smtp-{src}-{dst}")
+                if cred_hash not in self._seen_cred_hashes:
+                    self._seen_cred_hashes.add(cred_hash)
+                    a = self._add_alert(
+                        self.HIGH, "CREDENTIALS",
+                        "SMTP Session Detected (Cleartext)",
+                        "Unencrypted SMTP session detected. Email content and credentials may be visible.",
+                        src=src, dst=dst, proto="SMTP", raw_evidence=raw_text[:200],
+                        exploit=f"techbot brute {dst}"
+                    )
+                    alerts.append(a)
+
+        return alerts
+
+    def _check_cookies(self, pkt_info, raw_text, src, dst):
+        """Detect HTTP cookies transmitted without encryption."""
+        alerts = []
+        for layer in pkt_info.get("layers", []):
+            for fname, fval in layer.get("fields", []):
+                fname_lower = str(fname).lower()
+                fval_str = str(fval)
+                if fname_lower == "cookie" or fname_lower == "set-cookie":
+                    sensitive_flags = []
+                    fval_lower = fval_str.lower()
+                    if "session" in fval_lower or "token" in fval_lower or "auth" in fval_lower or "jwt" in fval_lower:
+                        sensitive_flags.append("Contains session/auth tokens")
+                    if "secure" not in fval_lower:
+                        sensitive_flags.append("Missing 'Secure' flag")
+                    if "httponly" not in fval_lower:
+                        sensitive_flags.append("Missing 'HttpOnly' flag")
+
+                    severity = self.HIGH if sensitive_flags else self.MEDIUM
+                    cookie_hash = hash(fval_str[:100])
+                    if cookie_hash not in self._seen_cred_hashes:
+                        self._seen_cred_hashes.add(cookie_hash)
+                        a = self._add_alert(
+                            severity, "COOKIES",
+                            "Unencrypted HTTP Cookie Detected",
+                            f"Cookie transmitted over cleartext HTTP.\n"
+                            f"Issues: {', '.join(sensitive_flags) if sensitive_flags else 'Unencrypted transport'}\n"
+                            f"Cookie: {fval_str[:300]}",
+                            src=src, dst=dst, proto="HTTP",
+                            raw_evidence=fval_str[:300],
+                            exploit=f"techbot brute {dst}"
+                        )
+                        alerts.append(a)
+        return alerts
+
+    def _check_cleartext_service(self, src, dst, dport):
+        """Alert on connections to well-known cleartext services."""
+        alerts = []
+        session_key = (src, dst, dport)
+        if session_key not in self._cleartext_sessions:
+            self._cleartext_sessions[session_key] = True
+            service = self.CLEARTEXT_PORTS.get(dport, f"Port {dport}")
+            severity = self.HIGH if dport in (21, 23, 110, 143, 389) else self.MEDIUM
+            a = self._add_alert(
+                severity, "CLEARTEXT",
+                f"Cleartext {service} Connection Detected",
+                f"Connection to {service} (port {dport}) uses NO encryption.\n"
+                f"All data including credentials is transmitted in plaintext.\n"
+                f"Recommendation: Use the encrypted alternative (SFTP, SSH, HTTPS, etc.)",
+                src=src, dst=dst, proto=service,
+                exploit=f"techbot fuzz {dst}"
+            )
+            alerts.append(a)
+        return alerts
+
+    def _check_tls(self, pkt_info, src, dst):
+        """Detect weak or deprecated TLS versions."""
+        alerts = []
+        raw_pkt = pkt_info.get("raw", None)
+        if raw_pkt is None:
+            return alerts
+
+        try:
+            if raw_pkt.haslayer(Raw):
+                raw_data = bytes(raw_pkt[Raw].load)
+                # TLS record header: content_type(1) + version(2) + length(2)
+                if len(raw_data) >= 5 and raw_data[0] == 0x16:  # Handshake
+                    major = raw_data[1]
+                    minor = raw_data[2]
+                    version_name = ""
+                    severity = None
+
+                    if major == 3 and minor == 0:
+                        version_name = "SSLv3.0"
+                        severity = self.CRITICAL
+                    elif major == 3 and minor == 1:
+                        version_name = "TLS 1.0"
+                        severity = self.HIGH
+                    elif major == 3 and minor == 2:
+                        version_name = "TLS 1.1"
+                        severity = self.MEDIUM
+
+                    if severity:
+                        tls_hash = hash(f"tls-{src}-{dst}-{version_name}")
+                        if tls_hash not in self._seen_cred_hashes:
+                            self._seen_cred_hashes.add(tls_hash)
+                            a = self._add_alert(
+                                severity, "TLS",
+                                f"Deprecated {version_name} Detected",
+                                f"Connection using {version_name} which is cryptographically weak.\n"
+                                f"Known vulnerabilities: POODLE, BEAST, CRIME attacks.\n"
+                                f"Recommendation: Upgrade to TLS 1.2 or TLS 1.3.",
+                                src=src, dst=dst, proto="TLS",
+                                raw_evidence=f"Version bytes: {major}.{minor}"
+                            )
+                            alerts.append(a)
+        except Exception:
+            pass
+        return alerts
+
+    def _check_arp_spoof(self, pkt_info, src, dst):
+        """Detect ARP cache poisoning by tracking IP-to-MAC mappings."""
+        alerts = []
+        # Extract MAC from layers
+        sender_mac = ""
+        sender_ip = src
+        for layer in pkt_info.get("layers", []):
+            if layer.get("name") == "ARP":
+                for fname, fval in layer.get("fields", []):
+                    if fname == "Sender MAC":
+                        sender_mac = str(fval)
+                    elif fname == "Sender IP":
+                        sender_ip = str(fval)
+
+        if sender_ip and sender_mac:
+            if sender_ip in self._arp_table:
+                known_macs = self._arp_table[sender_ip]
+                if sender_mac not in known_macs:
+                    # IP was previously associated with a different MAC!
+                    old_macs = ", ".join(known_macs)
+                    a = self._add_alert(
+                        self.CRITICAL, "ARP SPOOF",
+                        f"ARP Spoofing Detected — {sender_ip}",
+                        f"IP address {sender_ip} is now associated with MAC {sender_mac},\n"
+                        f"but was previously seen with MAC(s): {old_macs}.\n"
+                        f"This is a strong indicator of an active ARP poisoning / MITM attack.\n"
+                        f"Recommendation: Investigate immediately. Use static ARP entries.",
+                        src=sender_ip, dst=dst, proto="ARP",
+                        raw_evidence=f"Old: {old_macs} → New: {sender_mac}",
+                        exploit=f"techbot arpspoof {sender_ip} {dst}"
+                    )
+                    alerts.append(a)
+                    known_macs.add(sender_mac)
+            else:
+                self._arp_table[sender_ip] = {sender_mac}
+
+        return alerts
+
+    def _check_dns(self, pkt_info, domains, src, dst, pkt_len):
+        """Detect suspicious DNS: C2 domains, DNS tunneling, data exfiltration."""
+        alerts = []
+
+        for domain in domains:
+            domain_lower = domain.lower()
+
+            # Check against suspicious TLDs
+            for tld in self.SUSPICIOUS_TLDS:
+                if domain_lower.endswith(tld):
+                    a = self._add_alert(
+                        self.MEDIUM, "DNS",
+                        f"Suspicious TLD: {domain}",
+                        f"DNS query to domain with suspicious TLD ({tld}).\n"
+                        f"These TLDs are commonly associated with malware, phishing, and C2 infrastructure.",
+                        src=src, dst=dst, proto="DNS", raw_evidence=domain
+                    )
+                    alerts.append(a)
+                    break
+
+            # Check for known-bad domain fragments
+            for frag in self.SUSPICIOUS_DOMAIN_FRAGS:
+                if frag in domain_lower:
+                    a = self._add_alert(
+                        self.HIGH, "DNS",
+                        f"Suspicious Domain: {domain}",
+                        f"DNS query contains known malicious keyword '{frag}'.\n"
+                        f"Possible C2, malware callback, or phishing infrastructure.",
+                        src=src, dst=dst, proto="DNS", raw_evidence=domain
+                    )
+                    alerts.append(a)
+                    break
+
+            # DNS Tunneling detection: very long subdomain labels
+            labels = domain_lower.split(".")
+            long_labels = [l for l in labels if len(l) > 40]
+            if long_labels:
+                a = self._add_alert(
+                    self.HIGH, "DNS TUNNEL",
+                    f"Possible DNS Tunneling: {domain[:60]}...",
+                    f"DNS query has unusually long subdomain labels (>{40} chars).\n"
+                    f"This is a classic indicator of DNS tunneling / data exfiltration.\n"
+                    f"Tools: iodine, dnscat2, dns2tcp.",
+                    src=src, dst=dst, proto="DNS", raw_evidence=domain,
+                    exploit=f"techbot dnsspoof {domain} 127.0.0.1"
+                )
+                alerts.append(a)
+
+            # DNS query frequency anomaly (many large queries from same source)
+            self._dns_query_sizes[src].append(len(domain))
+            q_sizes = list(self._dns_query_sizes[src])
+            recent_large = sum(1 for s in q_sizes[-10:] if s > 30)
+            if recent_large >= self._dns_tunnel_threshold:
+                tunnel_hash = hash(f"dnstunnel-{src}")
+                if tunnel_hash not in self._seen_cred_hashes:
+                    self._seen_cred_hashes.add(tunnel_hash)
+                    a = self._add_alert(
+                        self.HIGH, "DNS TUNNEL",
+                        f"DNS Tunneling Pattern from {src}",
+                        f"Source {src} has sent {recent_large} large DNS queries in the last 10 packets.\n"
+                        f"Average query length: {sum(q_sizes[-10:]) / 10:.0f} chars.\n"
+                        f"This strongly suggests DNS tunneling for data exfiltration.",
+                        src=src, dst=dst, proto="DNS"
+                    )
+                    alerts.append(a)
+
+        return alerts
+
+    def _check_web_vulnerabilities(self, urls, src, dst):
+        """Detect SQLi, XSS, and other web attack patterns in URLs."""
+        alerts = []
+        sqli_patterns = [r"(' OR '1'='1)", r"(-- )", r"(union select)", r"(select @@version)"]
+        xss_patterns = [r"(<script>)", r"(alert\()", r"(onerror=)", r"(javascript:)"]
+        
+        for url in urls:
+            url_lower = url.lower()
+            for pattern in sqli_patterns:
+                if re.search(pattern, url_lower):
+                    a = self._add_alert(
+                        self.HIGH, "WEB VULN", "Possible SQL Injection Pattern",
+                        f"Detected SQL injection pattern in URL.\nPattern: {pattern}\nURL: {url}",
+                        src=src, dst=dst, proto="HTTP", raw_evidence=url,
+                        exploit=f"techbot fuzz {dst}"
+                    )
+                    alerts.append(a)
+                    break
+            
+            for pattern in xss_patterns:
+                if re.search(pattern, url_lower):
+                    a = self._add_alert(
+                        self.HIGH, "WEB VULN", "Possible XSS Pattern",
+                        f"Detected Cross-Site Scripting (XSS) pattern in URL.\nPattern: {pattern}\nURL: {url}",
+                        src=src, dst=dst, proto="HTTP", raw_evidence=url,
+                        exploit=f"techbot brute {dst}"
+                    )
+                    alerts.append(a)
+                    break
+        return alerts
+
+    def _check_port_scan(self, src, dst, dport):
+        """Detect port scanning by tracking SYN packets from same source."""
+        alerts = []
+        if src not in self._port_scan_tracker:
+            self._port_scan_tracker[src] = {}
+        if dst not in self._port_scan_tracker[src]:
+            self._port_scan_tracker[src][dst] = set()
+
+        self._port_scan_tracker[src][dst].add(dport)
+        port_count = len(self._port_scan_tracker[src][dst])
+
+        # Alert at threshold crossings
+        if port_count == self._port_scan_threshold:
+            a = self._add_alert(
+                self.HIGH, "PORT SCAN",
+                f"Port Scan Detected: {src} → {dst}",
+                f"Source {src} has sent SYN packets to {port_count} different ports on {dst}.\n"
+                f"Ports probed: {sorted(list(self._port_scan_tracker[src][dst]))[:20]}\n"
+                f"This is a strong indicator of host reconnaissance / service enumeration.",
+                src=src, dst=dst, proto="TCP",
+                exploit=f"techbot flood {src} 80"
+            )
+            alerts.append(a)
+        elif port_count > 0 and port_count % 50 == 0:
+            a = self._add_alert(
+                self.CRITICAL, "PORT SCAN",
+                f"Aggressive Port Scan: {src} → {dst} ({port_count} ports)",
+                f"Massive port scan in progress. {port_count} unique ports probed.\n"
+                f"This may indicate an automated scanner like Nmap, Masscan, or similar.",
+                src=src, dst=dst, proto="TCP"
+            )
+            alerts.append(a)
+
+        return alerts
+
+    def _check_exfiltration(self, src, dst, proto, pkt_len):
+        """Flag unusually large data transfers that could indicate exfiltration."""
+        alerts = []
+        exfil_hash = hash(f"exfil-{src}-{dst}-{pkt_len // 5000}")
+        if exfil_hash not in self._seen_cred_hashes:
+            self._seen_cred_hashes.add(exfil_hash)
+            size_kb = pkt_len / 1024
+            severity = self.MEDIUM if pkt_len < 50000 else self.HIGH
+            a = self._add_alert(
+                severity, "DATA EXFIL",
+                f"Large Data Transfer: {size_kb:.1f} KB",
+                f"Unusually large packet ({size_kb:.1f} KB) from {src} to {dst}.\n"
+                f"Protocol: {proto}.\n"
+                f"Large transfers to external IPs may indicate data exfiltration.",
+                src=src, dst=dst, proto=proto
+            )
+            alerts.append(a)
+        return alerts
 
 
 # ═══════════════════════════════════════════════════

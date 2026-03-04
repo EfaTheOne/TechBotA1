@@ -68,7 +68,7 @@ if [ -f "requirements.txt" ]; then
     pip install -r requirements.txt
 else
     echo -e "${RED}⚠ requirements.txt not found! Installing manual list...${NC}"
-    pip install customtkinter psutil Pillow pyttsx3 SpeechRecognition groq pyaudio requests cryptography scapy pyautogui beautifulsoup4
+    pip install customtkinter psutil Pillow pyttsx3 SpeechRecognition groq pyaudio requests cryptography scapy pyautogui beautifulsoup4 pywifi
 fi
 
 # 5. Finale - Create Launcher
